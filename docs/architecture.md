@@ -11,6 +11,7 @@
 | `hub.ts` | 单轮提案、预检、显式执行、未知结果核对 |
 | `run.ts` | Run、预算、等待条件、慢思考回应、目标验收与 Run 存储契约 |
 | `runtime.ts` | 可选的托管运行时：按 `step()` 串行推进、唤醒、批准、预算、恢复；见 `docs/runtime.md` |
+| `pg.ts` | PostgreSQL 适配器（`./pg` 入口）：注入式 SQL 客户端、幂等 DDL、每个操作一条语句 |
 | `jev.ts` | TypeSafe `/v1/systemone` Choice 协议适配，不模拟聊天工具调用 |
 | `memory.ts` | 单进程日志（可导出、可从记录重建）、资源预留、人工收件箱、事件缓冲 |
 | `primitives.ts` | 不可变快照、JSON 校验、确定性序列化、截止时间、记录/回执形状校验、动作身份 |
@@ -103,7 +104,7 @@ HumanInbox 存储缺少计划、信息或授权等请求。`acknowledge()` 只�
 
 ## 8. 当前可靠性上限
 
-默认 journal、proposal、inbox、lease 全部在内存。提案和租约随进程消失；journal 可以由宿主导出为 JSON 并在新进程重建，未终态记录按插件 ID、精确版本和能力 ID 重新绑定后只做查询核对，不重发。托管运行时（`docs/runtime.md`）为 Run 提供所有权租约和 `due()` / `step()`，宿主自己调度。仍未实现：内置后台循环、PostgreSQL 存储、outbox、人工请求持久化。
+默认 journal、proposal、inbox、lease 全部在内存。提案和租约随进程消失；journal 可以由宿主导出为 JSON 并在新进程重建，未终态记录按插件 ID、精确版本和能力 ID 重新绑定后只做查询核对，不重发。托管运行时（`docs/runtime.md`）为 Run 提供所有权租约和 `due()` / `step()`，宿主自己调度。PostgreSQL 适配器（`./pg`）提供持久的 journal 与 run store：资源锁是主键 `(tenant, resource)` 的独立表，claim 与终态释放各在一条语句内完成；一意图一未终态 Run 由部分唯一索引保证；事件去重由主键保证。SQL 在 PGlite 上离线验证，真实服务器可选。仍未实现：内置后台循环、outbox、人工请求持久化。
 
 约定：一份 journal 同一时刻只由一个 Hub 实例驱动。两个实例同时推进同一记录时，CAS 保证只有一个写入成功，输家得到 `journal-conflict` 并在下次 reconcile 收敛到赢家的结果，不会双重执行；但这只是保护，不是多写者支持。
 

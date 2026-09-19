@@ -109,7 +109,7 @@ type WaitCondition =
 
 ## 8. 持久化与恢复
 
-`RunStore` 只有五个方法：`create`（同一意图只允许一个未终态 Run）、`get`、`replace`（CAS，版本不符抛 `run-conflict`）、`markEvent`（事件去重）、`unsettled`。`MemoryRunStore` 的 `entries()/events()` 导出普通 JSON，构造函数重建；宿主决定落盘方式，`tests/runtime-worker.mjs` 演示了每次写入后落盘的文件存储。
+`RunStore` 只有五个方法：`create`（同一意图只允许一个未终态 Run）、`get`、`replace`（CAS，版本不符抛 `run-conflict`）、`markEvent`（事件去重）、`unsettled`。`MemoryRunStore` 的 `entries()/events()` 导出普通 JSON，构造函数重建；宿主决定落盘方式，`tests/runtime-worker.mjs` 演示了每次写入后落盘的文件存储。生产环境用 `@cognitive-hub/core/pg` 的 `PgRunStore` 与 `PgJournal`：CAS、一意图一未终态 Run 的唯一索引、事件去重都由 PostgreSQL 约束保证，`wake_at` 列记录 Run 最晚该被查看的时间。
 
 崩溃窗口与恢复策略：
 
@@ -133,4 +133,4 @@ type WaitCondition =
 - 一次只处理一个动作；并行分支需要多个 Run。
 - 一个 Run 同一时刻只由一个 worker 推进；跨进程互斥依赖租约与 CAS，不是队列。
 - 终止不等于回滚；没有 cancel 端口。
-- 内存存储不持久；PostgreSQL 存储是下一步。
+- 内存存储不持久；持久化用 `./pg` 适配器，它同样不提供队列或公平调度。

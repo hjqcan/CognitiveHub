@@ -28,13 +28,15 @@
 
 已实现：类型化契约；依赖驱动的插件激活与回滚；作用域能力注册；能力停用与在途排空；有限候选构造；直接 Jev HTTP 适配；状态/策略过期拒绝；默认预览；单次提案消费；进程内幂等与资源预留；未知结果核对；人工请求收件箱；内存事件记录；journal 导出/导入与进程重启后对未终态记录的查询核对；不含进程内激活代次的稳定动作身份；机器可读的拒绝码；可选的托管运行时（Run 生命周期、`step()` 串行推进、目标验收端口、结构化等待与唤醒、四类慢思考回应、每步批准模式、预算与无进展检测、Run 所有权租约、Run 存储导出/导入）。
 
-尚未实现：PostgreSQL journal/run store、outbox、内置后台循环（宿主调度 `due()` / `step()`）、分布式资源锁、网络认证服务、签名执行许可、插件沙箱/市场、MCP、C# SDK、真实机器人适配器、任意目标规划、取消/补偿端口。详见 [实现边界](docs/architecture.md) 和 [路线图](docs/roadmap.md)。
+已实现（存储）：PostgreSQL 适配器 `@cognitive-hub/core/pg`，注入式 SQL 客户端、每个操作一条语句、与内存实现共用一套一致性测试。
+
+尚未实现：outbox、内置后台循环（宿主调度 `due()` / `step()`）、分布式资源锁、网络认证服务、签名执行许可、插件沙箱/市场、MCP、C# SDK、真实机器人适配器、任意目标规划、取消/补偿端口。详见 [实现边界](docs/architecture.md) 和 [路线图](docs/roadmap.md)。
 
 原始 [v0.1 蓝图](docs/cognitive-hub-v0.1-blueprint.md) 保留不改；其中的 Issue 应用和大平台规划不是当前实现。本仓库以嵌入式插件内核为基线。
 
 ## 快速开始
 
-需要 Node.js 22+。TypeScript 严格模式，**零运行时依赖**；唯一开发依赖固定为 TypeScript 5.8.3。
+需要 Node.js 22+。TypeScript 严格模式，**零运行时依赖**；开发依赖只有 TypeScript 5.8.3 和用于离线验证 SQL 适配器的 PGlite 0.5.8。
 
 ```bash
 npm install --ignore-scripts
@@ -125,6 +127,21 @@ for (const id of await runtime.due()) await runtime.step(id);
 // 慢思考回应经宿主认证后交给 respond()：fact / guidance / approve / terminate 四类，旧提案永远不会被直接执行。
 ```
 
+## PostgreSQL 存储（可选）
+
+journal 与 run store 各有一个 PostgreSQL 适配器。它们不引入驱动，只依赖注入客户端的 `query(text, values) → { rows }`，node-postgres 的 Pool 可以直接传入；每个操作是一条 SQL 语句，原子性由 PostgreSQL 保证。
+
+```ts
+import { Pool } from 'pg';
+import { migrate, PgJournal, PgRunStore } from '@cognitive-hub/core/pg';
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+await migrate(pool);   // 幂等建表，表名前缀 cognitive_hub_
+const runtime = new IntentRuntime({ ...ports, journal: new PgJournal(pool), runs: new PgRunStore(pool) });
+```
+
+离线测试用 PGlite（编译成 WebAssembly 的真 PostgreSQL）运行同一套一致性测试和验收链路。设置 `COGNITIVE_HUB_PG_URL` 并自行安装 `pg` 后，同一套测试会额外对真实服务器运行；CI 未接入真实服务器。
+
 ## 插件带来的是什么？
 
 插件通过 `setup(ctx)` 注册能力和服务，通过 `manifest.requires/provides` 声明依赖。一个能力包含 `prepare → validate → check → execute → verify`，必要时提供只查询、不重放的 `reconcile`。
@@ -144,6 +161,7 @@ for (const id of await runtime.due()) await runtime.step(id);
 | [架构决策 0002](docs/adr/0002-durable-recovery.md) | 动作身份、跨进程恢复只查询不重发、单实例驱动约定 |
 | [托管运行时](docs/runtime.md) | Run 生命周期、step 顺序、等待与唤醒、慢思考往返、预算、恢复 |
 | [架构决策 0003](docs/adr/0003-managed-runtime.md) | 为什么是显式 step 而不是后台循环，Guidance 与 Policy 的分离 |
+| [架构决策 0004](docs/adr/0004-postgres-adapters.md) | 注入 SQL 客户端、每操作一条语句、用 PGlite 离线验证 |
 | [安全说明](SECURITY.md) | 为什么进程内插件不是沙箱 |
 | [路线图](docs/roadmap.md) | 从基础内核到真实宿主的验收条件 |
 

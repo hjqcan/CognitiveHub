@@ -10,6 +10,8 @@ Use stable operation IDs and canonical resource names. Propagate idempotency key
 
 Jev requests transmit supplied state to the configured HTTPS endpoint. Only provide task-relevant, approved data; never API credentials, private logs, or unrestricted sensor content. Redirects are rejected. API error bodies are not echoed. Input/response byte limits are enforced. These controls do not prevent semantic prompt injection; host authorization still applies.
 
+The PostgreSQL adapters take an injected client and issue only parameterized statements; they never interpolate data into SQL. The host owns credentials, pooling, TLS and the DDL rights `migrate()` needs. The `data` columns hold the same business data as the memory journal.
+
 Memory journals and deliberation inboxes contain business data. They require host-side access control, retention, deletion, and encrypted persistence before production. The event sink is observability, not a durable security audit.
 
 Do not commit `.env`, live API keys, production traces, or customer data. If reporting a vulnerability, avoid publishing secrets or weaponized details in public issues; use GitHub private vulnerability reporting if the repository enables it, otherwise contact the maintainer privately.
