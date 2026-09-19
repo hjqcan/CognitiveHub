@@ -220,7 +220,10 @@ export class IntentRuntime {
     const key = intentKey(draft.run.intent);
     this.#stepping.set(key, draft.run.id);
     let proposal: ProposalResult;
-    try { proposal = await this.hub.propose(draft.run.intent, { ...hubSignal, ...(draft.run.guidance ? { guidance: draft.run.guidance } : {}) }); }
+    try {
+      proposal = await this.hub.propose(draft.run.intent,
+        { ...hubSignal, ...(draft.run.guidance ? { guidance: draft.run.guidance } : {}), tags: { runId: draft.run.id } });
+    }
     finally { this.#stepping.delete(key); }
     if (proposal.kind === 'wait') {
       await save({ status: 'waiting', wait: [{ kind: 'state', version: observation.version }, { kind: 'time', at: now + draft.run.waitMs }],

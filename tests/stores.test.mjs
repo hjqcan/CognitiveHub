@@ -1,12 +1,13 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';
-import { MemoryJournal, MemoryRunStore } from '../dist/index.js';
-import { PgJournal, PgRunStore, migrate, SCHEMA_VERSION } from '../dist/pg.js';
-import { journalConformance, runStoreConformance } from './store-conformance.mjs';
+import { MemoryDecisionStore, MemoryJournal, MemoryRunStore } from '../dist/index.js';
+import { PgDecisionStore, PgJournal, PgRunStore, migrate, SCHEMA_VERSION } from '../dist/pg.js';
+import { decisionStoreConformance, journalConformance, runStoreConformance } from './store-conformance.mjs';
 
 journalConformance('MemoryJournal', async () => new MemoryJournal());
 runStoreConformance('MemoryRunStore', async () => new MemoryRunStore());
+decisionStoreConformance('MemoryDecisionStore', async () => new MemoryDecisionStore());
 
 // PGlite is real PostgreSQL compiled to WebAssembly, so the SQL is exercised offline with genuine semantics.
 let shared;
@@ -16,11 +17,12 @@ const pglite = async () => {
 };
 journalConformance('PgJournal (PGlite)', async () => new PgJournal(await pglite()));
 runStoreConformance('PgRunStore (PGlite)', async () => new PgRunStore(await pglite()));
+decisionStoreConformance('PgDecisionStore (PGlite)', async () => new PgDecisionStore(await pglite()));
 
-test('the schema migration is idempotent and records its version', async () => {
+test('the schema migration is idempotent and records every version', async () => {
   const db = await pglite(); await migrate(db);
-  const { rows } = await db.query('SELECT version FROM cognitive_hub_schema');
-  assert.deepEqual(rows.map(r => r.version), [SCHEMA_VERSION]);
+  const { rows } = await db.query('SELECT version FROM cognitive_hub_schema ORDER BY version');
+  assert.deepEqual(rows.map(r => r.version), [1, 2]); assert.equal(SCHEMA_VERSION, 2);
 });
 test('a lock collision leaves neither the record nor any of its other locks behind', async () => {
   const db = await pglite(); const journal = new PgJournal(db);
@@ -44,6 +46,7 @@ if (url) {
     await migrate(pool);
     journalConformance('PgJournal (server)', async () => new PgJournal(pool));
     runStoreConformance('PgRunStore (server)', async () => new PgRunStore(pool));
+    decisionStoreConformance('PgDecisionStore (server)', async () => new PgDecisionStore(pool));
     after(() => pool.end());
   }
 }

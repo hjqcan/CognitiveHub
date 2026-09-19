@@ -1,5 +1,5 @@
 import type {
-  BoundAction, Decision, DecisionProvider, DecisionRequest, DeliberationProvider,
+  BoundAction, Decision, DecisionProvider, DecisionRecord, DecisionRequest, DecisionStore, DeliberationProvider,
   EventSink, ExecutionContext, ExecutionJournal, ExecutionRecord, ExecutionResult,
   Guidance, Intent, Json, Observation, Policy, ProposalResult, Receipt, StateProvider, Verification,
 } from './contracts.js';
@@ -19,6 +19,7 @@ interface Proposal {
   decision: Decision;
   policyVersion: string;
   expiresAt: number;
+  decisionId: string | null;
 }
 interface Pending {
   readonly lease: CapabilityLease;
@@ -27,6 +28,16 @@ interface Pending {
   terminal: boolean;
 }
 type Patch = Partial<Pick<ExecutionRecord, 'status' | 'receipt' | 'evidence'>>;
+type Tags = { readonly [key: string]: string };
+/** What one propose() turn learned, accumulated as it runs and written out once at the end. */
+interface Trace {
+  observationVersion: string | null;
+  notRequested: string[];
+  considered: { pluginId: string; pluginVersion: string; capability: string; drafts: number }[];
+  excluded: { actionId: string; policyVersion: string; reason: string }[];
+  request: DecisionRequest | null;
+  decision: Decision | null;
+}
 export interface HubOptions {
   plugins: PluginHost;
   state: StateProvider;
@@ -36,6 +47,8 @@ export interface HubOptions {
   deliberation: DeliberationProvider;
   journal?: ExecutionJournal;
   events?: EventSink;
+  /** Optional audit of every turn. Failures are counted like observer errors and never change the outcome. */
+  decisions?: DecisionStore;
   proposalTtlMs?: number;
   decisionTimeoutMs?: number;
   executionTimeoutMs?: number;
@@ -108,27 +121,36 @@ export class CognitiveHub {
     return { kind: 'deliberation', request };
   }
 
-  async propose(input: Intent, options: { signal?: AbortSignal; guidance?: Guidance } = {}): Promise<ProposalResult> {
+  async propose(input: Intent, options: { signal?: AbortSignal; guidance?: Guidance; tags?: Tags } = {}): Promise<ProposalResult> {
     const intent = this.#intent(input);
     const guidance = options.guidance;
     if (guidance !== undefined) assertGuidance(guidance);
+    const tags = immutable(options.tags ?? {});
+    assertJson(tags as unknown);
+    for (const [key, value] of Object.entries(tags)) {
+      identifier(key, 'tag key'); ensure(typeof value === 'string', 'invalid-tags', 'Tag values must be strings');
+    }
     const session = canonical([intent.scope, intent.id]);
     if (this.#planning.has(session)) return { kind: 'wait', reason: 'A decision is already in flight for this intent' };
     this.#planning.add(session);
+    const decisionId = this.#options.decisions ? newId() : null;
+    const trace: Trace = { observationVersion: null, notRequested: [], considered: [], excluded: [], request: null, decision: null };
     const leases: CapabilityLease[] = [];
     let stateVersion: string | null = null;
     let began = false;
     let asking = false;
+    let result: ProposalResult;
+    let code: string | null = null;
     try {
-      return await bounded(this.#decisionTimeout, options.signal, async signal => {
+      result = await bounded(this.#decisionTimeout, options.signal, async signal => {
         began = true;
         try {
           const observation = this.#observation(await this.#options.state.observe(intent, signal));
-          stateVersion = observation.version;
+          stateVersion = observation.version; trace.observationVersion = observation.version;
           signal.throwIfAborted();
           const prepared: BoundAction[] = [];
           for (const registration of this.#options.plugins.list(intent.scope)) {
-            if (!intent.capabilities.includes(registration.capability.id)) continue;
+            if (!intent.capabilities.includes(registration.capability.id)) { trace.notRequested.push(registration.capability.id); continue; }
             const lease = this.#options.plugins.acquire(registration.pluginId,
               registration.capability.id, registration.activation, intent.scope);
             leases.push(lease);
@@ -136,6 +158,8 @@ export class CognitiveHub {
             const drafts = await capability.prepare({ intent, observation, signal });
             signal.throwIfAborted();
             ensure(Array.isArray(drafts as unknown), 'invalid-candidate', 'Candidate builder must return an array');
+            trace.considered.push({ pluginId: registration.pluginId, pluginVersion: registration.pluginVersion,
+              capability: capability.id, drafts: drafts.length });
             const keys = new Set<string>();
             for (const draft of drafts) {
               assertJson(draft as unknown); identifier(draft.key, 'candidate key'); identifier(draft.description, 'candidate description');
@@ -162,13 +186,18 @@ export class CognitiveHub {
           for (const action of prepared) {
             const policy = await this.#options.policy.check({ intent, observation, candidates: prepared, action, phase: 'propose' }, signal);
             signal.throwIfAborted(); identifier(policy.version, 'policy version');
-            if (policy.allowed !== true) continue;
+            if (policy.allowed !== true) {
+              trace.excluded.push({ actionId: action.id, policyVersion: policy.version, reason: typeof policy.reason === 'string' ? policy.reason : '' });
+              continue;
+            }
             candidates.push(action); policyVersions.set(action.id, policy.version);
           }
           if (!candidates.length) return { kind: 'deliberate' as const, reason: 'No authorized, applicable capability candidates' };
           const request: DecisionRequest = immutable({ intent, observation, candidates, ...(guidance ? { guidance } : {}) });
+          trace.request = request;
           const decision = immutable(await this.#options.decision.decide(request, signal));
           assertJson(decision); signal.throwIfAborted();
+          trace.decision = decision;
           ensure(observation.validUntil > this.#now(), 'stale-state', 'State expired while deciding');
           this.#emit('decision.received', { intentId: intent.id, provider: this.#options.decision.name, kind: decision.kind });
           if (decision.kind === 'wait' || decision.kind === 'deliberate') identifier(decision.reason, 'decision reason');
@@ -177,7 +206,7 @@ export class CognitiveHub {
           ensure(decision.kind === 'action', 'invalid-decision', 'Unknown decision kind');
           const action = candidates.find(c => c.id === decision.candidateId);
           ensure(action, 'invalid-decision', 'Model selected an unknown candidate');
-          const proposal: Proposal = immutable({ id: newId(), intent, observation, action, decision,
+          const proposal: Proposal = immutable({ id: newId(), intent, observation, action, decision, decisionId,
             policyVersion: policyVersions.get(action.id)!, expiresAt: Math.min(observation.validUntil, this.#now() + this.#ttl) });
           for (const [id, existing] of this.#proposals) if (existing.expiresAt <= this.#now()) this.discard(id);
           ensure(this.#proposals.size < this.#maxProposals, 'proposal-limit', 'Consume/discard outstanding proposals before creating more');
@@ -192,11 +221,36 @@ export class CognitiveHub {
       });
     } catch (error) {
       if (asking) throw error;
-      if (options.signal?.aborted) return { kind: 'wait', reason: 'Decision cancelled by host' };
-      const code = error instanceof Error && 'code' in error ? String(error.code) : 'decision-unavailable';
-      this.#emit('decision.rejected', { intentId: intent.id, code });
-      return await this.#ask(intent, code, stateVersion);
+      if (options.signal?.aborted) { code = 'aborted'; result = { kind: 'wait', reason: 'Decision cancelled by host' }; }
+      else {
+        code = error instanceof Error && 'code' in error ? String(error.code) : 'decision-unavailable';
+        this.#emit('decision.rejected', { intentId: intent.id, code });
+        result = await this.#ask(intent, code, stateVersion);
+      }
     } finally { if (!began) this.#planning.delete(session); }
+    await this.#recordDecision(decisionId, intent, tags, guidance, trace, result, code);
+    return result;
+  }
+  async #recordDecision(id: string | null, intent: Intent, tags: Tags, guidance: Guidance | undefined,
+    trace: Trace, result: ProposalResult, code: string | null): Promise<void> {
+    const store = this.#options.decisions;
+    if (!store || id === null) return;
+    const record: DecisionRecord = immutable({
+      id, intentId: intent.id, intentRevision: intent.revision, scope: intent.scope, tags,
+      observationVersion: trace.observationVersion, guidanceVersion: guidance?.version ?? null,
+      notRequested: trace.notRequested, considered: trace.considered, excluded: trace.excluded,
+      request: trace.request, provider: this.#options.decision.name, decision: trace.decision,
+      outcome: result.kind === 'proposal' ? 'proposal' : result.kind === 'wait' ? 'wait' : 'deliberation', code,
+      proposalId: result.kind === 'proposal' ? result.id : null,
+      requestId: result.kind === 'deliberation' ? result.request.id : null,
+      recordId: null, createdAt: this.#now(),
+    });
+    try { await store.append(record); this.#emit('decision.recorded', { decisionId: id, intentId: intent.id, outcome: record.outcome }); }
+    catch { this.#observerErrors++; this.#emit('decision.record.failed', { decisionId: id, intentId: intent.id }); }
+  }
+  async #linkDecision(id: string, recordId: string): Promise<void> {
+    try { await this.#options.decisions?.link(id, recordId); }
+    catch { this.#observerErrors++; this.#emit('decision.record.failed', { decisionId: id, recordId }); }
   }
 
   discard(proposalId: string): boolean { this.#consumed.delete(proposalId); return this.#proposals.delete(proposalId); }
@@ -261,6 +315,7 @@ export class CognitiveHub {
       // Retain the plugin and resources until a terminal result is durably recorded.
       retained = true;
       this.#consumed.set(proposalId, id);
+      if (proposal.decisionId !== null) await this.#linkDecision(proposal.decisionId, id);
       const pending: Pending = { lease, context, callbacks: 0, terminal: false };
       this.#pending.set(id, pending);
       this.#emit('execution.submitted', { id, operationId, capability: action.capability });

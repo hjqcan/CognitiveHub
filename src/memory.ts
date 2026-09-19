@@ -1,5 +1,5 @@
 import type {
-  Claim, DeliberationProvider, DeliberationRequest, EventSink, ExecutionJournal, ExecutionRecord, HubEvent,
+  Claim, DecisionRecord, DecisionStore, DeliberationProvider, DeliberationRequest, EventSink, ExecutionJournal, ExecutionRecord, HubEvent,
 } from './contracts.js';
 import type { Run, RunStore } from './run.js';
 import { runTerminal } from './run.js';
@@ -103,6 +103,37 @@ export class MemoryRunStore implements RunStore {
   async unsettled(): Promise<readonly Run[]> { return [...this.#runs.values()].filter(r => !runTerminal(r.status)); }
   entries(): readonly Run[] { return [...this.#runs.values()]; }
   events(): readonly string[] { return [...this.#events]; }
+}
+/** Single-process decision audit. entries() exports plain JSON; the constructor rebuilds from it. */
+export class MemoryDecisionStore implements DecisionStore {
+  readonly #records = new Map<string, DecisionRecord>();
+  constructor(records: readonly DecisionRecord[] = []) {
+    for (const input of records) {
+      assertJson(input as unknown); identifier(input.id, 'decision id');
+      ensure(!this.#records.has(input.id), 'duplicate-decision', `Duplicate decision ${input.id}`);
+      this.#records.set(input.id, immutable(input));
+    }
+  }
+  async append(record: DecisionRecord): Promise<void> {
+    assertJson(record as unknown); identifier(record.id, 'decision id');
+    ensure(!this.#records.has(record.id), 'duplicate-decision', `Duplicate decision ${record.id}`);
+    this.#records.set(record.id, immutable(record));
+  }
+  async link(id: string, recordId: string): Promise<void> {
+    identifier(recordId, 'record id');
+    const current = this.#records.get(id);
+    ensure(current, 'unknown-decision', `Unknown decision ${id}`);
+    this.#records.set(id, immutable({ ...current, recordId }));
+  }
+  async list(query: { readonly intentId?: string; readonly tag?: { readonly key: string; readonly value: string }; readonly limit?: number } = {}):
+    Promise<readonly DecisionRecord[]> {
+    const rows = [...this.#records.values()]
+      .filter(r => (query.intentId === undefined || r.intentId === query.intentId) &&
+        (query.tag === undefined || r.tags[query.tag.key] === query.tag.value))
+      .sort((a, b) => a.createdAt - b.createdAt);
+    return query.limit === undefined ? rows : rows.slice(0, query.limit);
+  }
+  entries(): readonly DecisionRecord[] { return [...this.#records.values()]; }
 }
 export class MemoryEvents implements EventSink {
   readonly #events: HubEvent[] = [];

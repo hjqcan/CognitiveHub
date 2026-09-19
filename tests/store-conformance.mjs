@@ -100,3 +100,34 @@ export function runStoreConformance(name, store) {
     assert.ok(ids.includes(a.id)); assert.ok(!ids.includes(b.id));
   });
 }
+
+export const decision = (changes = {}) => ({
+  id: unique('decision'), intentId: changes.intentId ?? 'intent', intentRevision: 1, scope: ['tenant-a'], tags: changes.tags ?? {},
+  observationVersion: 'v1', guidanceVersion: null, notRequested: [],
+  considered: [{ pluginId: 'p', pluginVersion: '1.0.0', capability: 'cap@1', drafts: 1 }], excluded: [],
+  request: null, provider: 'fixture', decision: { kind: 'wait', reason: 'r' }, outcome: 'wait', code: null,
+  proposalId: null, requestId: null, recordId: null, createdAt: changes.createdAt ?? 1,
+});
+
+export function decisionStoreConformance(name, store) {
+  test(`${name}: append is unique by id and link attaches the execution record`, async () => {
+    const s = await store(); const d = decision({ intentId: unique('intent') });
+    await s.append(d);
+    assert.deepEqual((await s.list({ intentId: d.intentId })).find(x => x.id === d.id), d);
+    await assert.rejects(s.append(d), { code: 'duplicate-decision' });
+    await s.link(d.id, 'record-1');
+    assert.equal((await s.list({ intentId: d.intentId })).find(x => x.id === d.id).recordId, 'record-1');
+    await assert.rejects(s.link('missing', 'record-1'), { code: 'unknown-decision' });
+  });
+  test(`${name}: list filters by intent and tag, in time order, with a limit`, async () => {
+    const s = await store(); const intentId = unique('intent'), runId = unique('run');
+    const a = decision({ intentId, tags: { runId }, createdAt: 3 });
+    const b = decision({ intentId, tags: { runId: 'other' }, createdAt: 1 });
+    const c = decision({ intentId, createdAt: 2 });
+    for (const d of [a, b, c]) await s.append(d);
+    assert.deepEqual((await s.list({ intentId })).map(x => x.id), [b.id, c.id, a.id]);
+    assert.deepEqual((await s.list({ intentId, tag: { key: 'runId', value: runId } })).map(x => x.id), [a.id]);
+    assert.deepEqual((await s.list({ intentId, limit: 2 })).map(x => x.id), [b.id, c.id]);
+    assert.equal((await s.list({ intentId: unique('none') })).length, 0);
+  });
+}

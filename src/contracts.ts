@@ -175,6 +175,45 @@ export type ExecutionResult =
   | { readonly kind: 'dry-run'; readonly action: BoundAction }
   /** code is stable and machine-readable; reason is for humans and may change. */
   | { readonly kind: 'rejected'; readonly code: string; readonly reason: string };
+/**
+ * Why one turn went the way it did, from what propose() computed anyway. Observability and offline replay,
+ * never authorization. The stored request contains observation facts: govern it like the journal.
+ */
+export interface DecisionRecord {
+  readonly id: string;
+  readonly intentId: string;
+  readonly intentRevision: number;
+  readonly scope: Scope;
+  /** Opaque string labels supplied by the caller (the managed runtime sets runId). */
+  readonly tags: { readonly [key: string]: string };
+  readonly observationVersion: string | null;
+  readonly guidanceVersion: number | null;
+  /** Capabilities visible in scope that the intent did not request. */
+  readonly notRequested: readonly string[];
+  /** Capabilities whose prepare() ran, with how many drafts each produced. */
+  readonly considered: readonly { readonly pluginId: string; readonly pluginVersion: string; readonly capability: string; readonly drafts: number }[];
+  /** Bound actions the host policy denied. */
+  readonly excluded: readonly { readonly actionId: string; readonly policyVersion: string; readonly reason: string }[];
+  /** Exactly what the decider saw, or null when there was nothing to decide. */
+  readonly request: DecisionRequest | null;
+  readonly provider: string;
+  readonly decision: Decision | null;
+  readonly outcome: 'proposal' | 'wait' | 'deliberation';
+  /** Error code when the turn ended through a failure path, else null. */
+  readonly code: string | null;
+  readonly proposalId: string | null;
+  readonly requestId: string | null;
+  /** Journal record produced from the proposal; linked when execution claims it. */
+  readonly recordId: string | null;
+  readonly createdAt: number;
+}
+export interface DecisionStore {
+  append(record: DecisionRecord): Promise<void>;
+  link(id: string, recordId: string): Promise<void>;
+  /** Ascending by createdAt; limit keeps the earliest matches. */
+  list(query?: { readonly intentId?: string; readonly tag?: { readonly key: string; readonly value: string }; readonly limit?: number }):
+    Promise<readonly DecisionRecord[]>;
+}
 export interface HubEvent {
   readonly type: string;
   readonly at: number;

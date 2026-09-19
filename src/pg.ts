@@ -1,4 +1,4 @@
-import type { Claim, ExecutionJournal, ExecutionRecord } from './contracts.js';
+import type { Claim, DecisionRecord, DecisionStore, ExecutionJournal, ExecutionRecord } from './contracts.js';
 import type { Run, RunStore } from './run.js';
 import { runTerminal } from './run.js';
 import { terminal } from './memory.js';
@@ -13,8 +13,8 @@ import { assertJson, assertRecord, ensure, HubError, identifier, immutable } fro
 export interface SqlClient {
   query(text: string, values?: readonly unknown[]): Promise<{ readonly rows: readonly Record<string, unknown>[] }>;
 }
-export const SCHEMA_VERSION = 1;
-/** Idempotent DDL. Tables are prefixed; use search_path on the connection for further isolation. */
+export const SCHEMA_VERSION = 2;
+/** Idempotent DDL in version order; each version ends by recording itself. Tables are prefixed; use search_path for further isolation. */
 export const schema: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS cognitive_hub_schema (version integer PRIMARY KEY, applied_at double precision NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS cognitive_hub_records (
@@ -32,7 +32,14 @@ export const schema: readonly string[] = [
      WHERE status NOT IN ('completed', 'failed', 'stopped')`,
   `CREATE INDEX IF NOT EXISTS cognitive_hub_runs_due ON cognitive_hub_runs (wake_at) WHERE wake_at IS NOT NULL`,
   `CREATE TABLE IF NOT EXISTS cognitive_hub_run_events (run_id text NOT NULL, key text NOT NULL, PRIMARY KEY (run_id, key))`,
-  `INSERT INTO cognitive_hub_schema (version, applied_at) VALUES (${SCHEMA_VERSION}, extract(epoch from now()) * 1000)
+  `INSERT INTO cognitive_hub_schema (version, applied_at) VALUES (1, extract(epoch from now()) * 1000)
+     ON CONFLICT (version) DO NOTHING`,
+  // Version 2: decision audit.
+  `CREATE TABLE IF NOT EXISTS cognitive_hub_decisions (
+     id text PRIMARY KEY, tenant text NOT NULL, intent_id text NOT NULL, created_at double precision NOT NULL, data jsonb NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS cognitive_hub_decisions_by_intent ON cognitive_hub_decisions (tenant, intent_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS cognitive_hub_decisions_tags ON cognitive_hub_decisions USING gin ((data -> 'tags'))`,
+  `INSERT INTO cognitive_hub_schema (version, applied_at) VALUES (2, extract(epoch from now()) * 1000)
      ON CONFLICT (version) DO NOTHING`,
 ];
 export async function migrate(client: SqlClient): Promise<void> {
@@ -66,6 +73,12 @@ const SQL = {
   run: `SELECT data FROM cognitive_hub_runs WHERE id = $1`,
   unsettledRuns: `SELECT data FROM cognitive_hub_runs WHERE status NOT IN ('completed', 'failed', 'stopped') ORDER BY updated_at, id`,
   markEvent: `INSERT INTO cognitive_hub_run_events (run_id, key) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING run_id`,
+  appendDecision: `INSERT INTO cognitive_hub_decisions (id, tenant, intent_id, created_at, data)
+    VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (id) DO NOTHING RETURNING id`,
+  linkDecision: `UPDATE cognitive_hub_decisions SET data = jsonb_set(data, '{recordId}', to_jsonb($2::text)) WHERE id = $1 RETURNING id`,
+  listDecisions: `SELECT data FROM cognitive_hub_decisions
+    WHERE ($1::text IS NULL OR intent_id = $1) AND ($2::jsonb IS NULL OR data -> 'tags' @> $2::jsonb)
+    ORDER BY created_at, id LIMIT $3`,
 };
 const uniqueViolation = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '23505';
@@ -177,5 +190,34 @@ export class PgRunStore implements RunStore {
   async unsettled(): Promise<readonly Run[]> {
     const { rows } = await this.#sql.query(SQL.unsettledRuns);
     return rows.map(row => this.#run(row.data));
+  }
+}
+
+export class PgDecisionStore implements DecisionStore {
+  readonly #sql: SqlClient;
+  constructor(client: SqlClient) { this.#sql = client; }
+  #decision(data: unknown): DecisionRecord {
+    const value = parse(data);
+    assertJson(value);
+    const record = value as unknown as DecisionRecord;
+    identifier(record.id, 'decision id');
+    return immutable(record);
+  }
+  async append(record: DecisionRecord): Promise<void> {
+    assertJson(record as unknown); identifier(record.id, 'decision id');
+    const { rows } = await this.#sql.query(SQL.appendDecision,
+      [record.id, record.scope[0] ?? '', record.intentId, record.createdAt, JSON.stringify(record)]);
+    ensure(rows.length === 1, 'duplicate-decision', `Duplicate decision ${record.id}`);
+  }
+  async link(id: string, recordId: string): Promise<void> {
+    identifier(id, 'decision id'); identifier(recordId, 'record id');
+    const { rows } = await this.#sql.query(SQL.linkDecision, [id, recordId]);
+    ensure(rows.length === 1, 'unknown-decision', `Unknown decision ${id}`);
+  }
+  async list(query: { readonly intentId?: string; readonly tag?: { readonly key: string; readonly value: string }; readonly limit?: number } = {}):
+    Promise<readonly DecisionRecord[]> {
+    const tag = query.tag ? JSON.stringify({ [query.tag.key]: query.tag.value }) : null;
+    const { rows } = await this.#sql.query(SQL.listDecisions, [query.intentId ?? null, tag, query.limit ?? null]);
+    return rows.map(row => this.#decision(row.data));
   }
 }
