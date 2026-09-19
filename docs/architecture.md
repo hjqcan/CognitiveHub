@@ -9,6 +9,8 @@
 | `contracts.ts` | JSON 数据、Intent、能力、动作、端口、回执与执行日志契约 |
 | `plugins.ts` | 显式模块安装、服务依赖、生命周期、可撤销贡献、能力作用域 |
 | `hub.ts` | 单轮提案、预检、显式执行、未知结果核对 |
+| `run.ts` | Run、预算、等待条件、慢思考回应、目标验收与 Run 存储契约 |
+| `runtime.ts` | 可选的托管运行时：按 `step()` 串行推进、唤醒、批准、预算、恢复；见 `docs/runtime.md` |
 | `jev.ts` | TypeSafe `/v1/systemone` Choice 协议适配，不模拟聊天工具调用 |
 | `memory.ts` | 单进程日志（可导出、可从记录重建）、资源预留、人工收件箱、事件缓冲 |
 | `primitives.ts` | 不可变快照、JSON 校验、确定性序列化、截止时间、记录/回执形状校验、动作身份 |
@@ -101,8 +103,12 @@ HumanInbox 存储缺少计划、信息或授权等请求。`acknowledge()` 只�
 
 ## 8. 当前可靠性上限
 
-默认 journal、proposal、inbox、lease 全部在内存。提案和租约随进程消失；journal 可以由宿主导出为 JSON 并在新进程重建，未终态记录按插件 ID、精确版本和能力 ID 重新绑定后只做查询核对，不重发。仍未实现：自动恢复循环、跨进程所有权租约、PostgreSQL journal、outbox、人工请求持久化。
+默认 journal、proposal、inbox、lease 全部在内存。提案和租约随进程消失；journal 可以由宿主导出为 JSON 并在新进程重建，未终态记录按插件 ID、精确版本和能力 ID 重新绑定后只做查询核对，不重发。托管运行时（`docs/runtime.md`）为 Run 提供所有权租约和 `due()` / `step()`，宿主自己调度。仍未实现：内置后台循环、PostgreSQL 存储、outbox、人工请求持久化。
 
 约定：一份 journal 同一时刻只由一个 Hub 实例驱动。两个实例同时推进同一记录时，CAS 保证只有一个写入成功，输家得到 `journal-conflict` 并在下次 reconcile 收敛到赢家的结果，不会双重执行；但这只是保护，不是多写者支持。
 
 本版本适合开发、模拟、旁路决策和受限的可信进程内集成。真实设备/不可逆操作接入前，必须先完成路线图中的可靠性阶段。
+
+## 9. 托管运行时
+
+单轮内核之上有一层可选的 `IntentRuntime`：宿主交付 Run，运行时在每次 `step()` 里按“核对在途 → 观察 → 目标验收 → 预算 → 提案 → 批准 → 派发”的固定顺序推进，至多派发一个动作。Run 只持久化可恢复状态，派发真相仍在执行日志。慢思考请求带 `runId` 与 `kind`，回应分 fact / guidance / approve / terminate 四类并按请求 id 与意图修订门控。`Guidance` 是给决策器的数据，与授权端口 `Policy` 严格分开。细节见 `docs/runtime.md`。

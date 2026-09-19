@@ -23,6 +23,9 @@ TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexed
 | hub.test.mjs | 默认预览、授权、策略候选全集、claim 后过期、单飞、幂等、重新激活后的幂等重试、资源锁、未知结果、无查询钩子的证据核验、accepted 核验、迟到回调租约、不可变快照、故障、结果码、无变化不写修订 |
 | recovery.test.mjs | 新进程从导出 JSON 重建 journal 后只查询核对；空回执；版本/作用域不匹配阻塞；恢复记录持有租约；外部终态释放本地租约；两个实例并发核对的冲突收敛；查询失败；过期观测；unsettled |
 | restart.test.mjs | 真实两次进程：派发后退出，再启动后核对原任务，外部提交计数仍为 1 |
+| runtime.test.mjs | 托管运行时：一步一动作、目标先检查、模型 wait 与时间唤醒、事件去重、预算与修订、过期回应、每步批准、guidance 版本、stop/terminate/pause、租约、撤权拒绝、版本变化阻塞、幽灵操作清理、due、意图修订 |
+| runtime-chain.test.mjs | v0.2 验收链路（进程内）：第一步完成 → 第二步回执丢失 → 快照重建 → 按键核对不重复 → 缺信息等人 → 补充后完成 |
+| runtime-kill.test.mjs | 真实 SIGKILL：worker 在派发中被杀，下一次 worker 按幂等键核对，外部提交计数不变，最终 completed |
 | jev.test.mjs | 实际 HTTP shape、候选映射、概率校验、错误脱敏、deadline、体积限制 |
 | examples.test.mjs | 两个不同宿主使用相同内核，不联网即可完成模拟闭环 |
 

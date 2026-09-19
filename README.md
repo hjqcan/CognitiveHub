@@ -26,9 +26,9 @@
 
 这是 **v0.1 foundation**：可以编译、测试、运行模拟闭环的底层实现，不是生产机器人控制系统。
 
-已实现：类型化契约；依赖驱动的插件激活与回滚；作用域能力注册；能力停用与在途排空；有限候选构造；直接 Jev HTTP 适配；状态/策略过期拒绝；默认预览；单次提案消费；进程内幂等与资源预留；未知结果核对；人工请求收件箱；内存事件记录；journal 导出/导入与进程重启后对未终态记录的查询核对；不含进程内激活代次的稳定动作身份；机器可读的拒绝码。
+已实现：类型化契约；依赖驱动的插件激活与回滚；作用域能力注册；能力停用与在途排空；有限候选构造；直接 Jev HTTP 适配；状态/策略过期拒绝；默认预览；单次提案消费；进程内幂等与资源预留；未知结果核对；人工请求收件箱；内存事件记录；journal 导出/导入与进程重启后对未终态记录的查询核对；不含进程内激活代次的稳定动作身份；机器可读的拒绝码；可选的托管运行时（Run 生命周期、`step()` 串行推进、目标验收端口、结构化等待与唤醒、四类慢思考回应、每步批准模式、预算与无进展检测、Run 所有权租约、Run 存储导出/导入）。
 
-尚未实现：PostgreSQL journal/outbox、自动恢复循环、跨进程所有权租约、分布式资源锁、网络认证服务、签名执行许可、插件沙箱/市场、MCP、C# SDK、真实机器人适配器、任意目标规划、完整自主调度循环。详见 [实现边界](docs/architecture.md) 和 [路线图](docs/roadmap.md)。
+尚未实现：PostgreSQL journal/run store、outbox、内置后台循环（宿主调度 `due()` / `step()`）、分布式资源锁、网络认证服务、签名执行许可、插件沙箱/市场、MCP、C# SDK、真实机器人适配器、任意目标规划、取消/补偿端口。详见 [实现边界](docs/architecture.md) 和 [路线图](docs/roadmap.md)。
 
 原始 [v0.1 蓝图](docs/cognitive-hub-v0.1-blueprint.md) 保留不改；其中的 Issue 应用和大平台规划不是当前实现。本仓库以嵌入式插件内核为基线。
 
@@ -108,6 +108,23 @@ if (proposal.kind === 'proposal') {
 
 包尚未发布到 npm（`private: true`）。克隆仓库后可构建，或在本地项目中用 `file:` 依赖。上述示例中的宿主端口需要由你的系统提供，不是仓库自带的机器人实现。
 
+## 托管运行时（可选）
+
+宿主也可以交付一个完整目标，让运行时持续推进。它不在后台循环：宿主在事件到达或 `due()` 到期时调用 `step()`，每次至多派发一个动作；目标完成必须由 `GoalEvaluator` 用宿主证据确认。完整说明见 [托管运行时](docs/runtime.md)。
+
+```ts
+import { IntentRuntime, HumanInbox } from '@cognitive-hub/core';
+
+const runtime = new IntentRuntime({
+  plugins, state: yourStateProvider, policy: yourHostPolicy, decision: plugins.resolve('decision.v1'),
+  deliberation: new HumanInbox(), goal: yourGoalEvaluator, owner: 'worker-1',
+});
+const run = await runtime.start({ intent, approval: 'automatic',
+  budget: { maxDecisions: 50, maxActions: 20, maxNoProgress: 3, deadlineAt: null } });
+for (const id of await runtime.due()) await runtime.step(id);
+// 慢思考回应经宿主认证后交给 respond()：fact / guidance / approve / terminate 四类，旧提案永远不会被直接执行。
+```
+
 ## 插件带来的是什么？
 
 插件通过 `setup(ctx)` 注册能力和服务，通过 `manifest.requires/provides` 声明依赖。一个能力包含 `prepare → validate → check → execute → verify`，必要时提供只查询、不重放的 `reconcile`。
@@ -125,6 +142,8 @@ if (proposal.kind === 'proposal') {
 | [参考实现分析](docs/references.md) | 从 jev-trader / dsh 借鉴什么、明确不照搬什么 |
 | [架构决策 0001](docs/adr/0001-foundation.md) | 技术栈与首版取舍 |
 | [架构决策 0002](docs/adr/0002-durable-recovery.md) | 动作身份、跨进程恢复只查询不重发、单实例驱动约定 |
+| [托管运行时](docs/runtime.md) | Run 生命周期、step 顺序、等待与唤醒、慢思考往返、预算、恢复 |
+| [架构决策 0003](docs/adr/0003-managed-runtime.md) | 为什么是显式 step 而不是后台循环，Guidance 与 Policy 的分离 |
 | [安全说明](SECURITY.md) | 为什么进程内插件不是沙箱 |
 | [路线图](docs/roadmap.md) | 从基础内核到真实宿主的验收条件 |
 
@@ -134,4 +153,4 @@ Hub 的模型概率不是动作成功率；插件描述不是授权；`live: tru
 
 执行超时属于“结果未知”，不等于“没有发生”。本实现不会自动重试执行动作。未知操作会持续持有本进程资源预留，直到 `reconcile()` 通过能力的独立证据确认结果。
 
-进程重启后，新进程可以从导出的 journal 重建记录，按插件 ID、精确插件版本和能力 ID 重新绑定当前实现，然后只查询核对，不重发。找不到兼容实现时记录保持阻塞并返回稳定的拒绝码。一份 journal 同一时刻只应由一个 Hub 实例驱动；自动恢复循环和跨进程所有权租约尚未实现。
+进程重启后，新进程可以从导出的 journal 重建记录，按插件 ID、精确插件版本和能力 ID 重新绑定当前实现，然后只查询核对，不重发。找不到兼容实现时记录保持阻塞并返回稳定的拒绝码。一份 journal 同一时刻只应由一个 Hub 实例驱动。托管运行时的 Run 有所有权租约：同一 worker 重启后接管自己的租约，其他 worker 要等它过期；这是单工作进程的崩溃恢复，不是分布式调度。

@@ -1,0 +1,136 @@
+# 托管运行时：把单轮内核变成可持续推进的委托
+
+单轮 API（`propose / execute / reconcile`）保持不变，任何宿主可以只用它。`IntentRuntime` 是可选的一层：宿主交付一个 Run，运行时在每次 `step()` 里推进一步，需要慢思考时停下来，得到回应后继续，进程重启后从存储里知道做到哪里。它**不在后台循环**，也不拥有调度：`due()` 告诉宿主哪些 Run 现在该推进，事件到达时宿主调用 `deliver()` 或直接 `step()`。
+
+```ts
+import { IntentRuntime, HumanInbox } from '@cognitive-hub/core';
+
+const runtime = new IntentRuntime({
+  plugins, state, policy, decision: plugins.resolve('decision.v1'), deliberation: new HumanInbox(),
+  goal: yourGoalEvaluator,   // 必选：完成必须有宿主查询到的证据
+  owner: 'worker-1',         // 所有权租约的稳定身份
+});
+const run = await runtime.start({ intent, approval: 'automatic',
+  budget: { maxDecisions: 50, maxActions: 20, maxNoProgress: 3, deadlineAt: null } });
+for (const id of await runtime.due()) await runtime.step(id);
+```
+
+运行时自己构造内部的 `CognitiveHub`（`runtime.hub` 可直接使用），并把 `hub.propose()` 里产生的慢思考请求打上 `runId`，宿主据此调用 `respond()`。
+
+## 1. 对象
+
+| 对象 | 内容 |
+| --- | --- |
+| `RunSpec` | `intent`、`budget`、`approval`（必填：`automatic` 或 `each-action`）、可选 `guidance`、`waitMs` |
+| `Run` | 意图快照、guidance、预算、状态、`operations`（派发过的 journal 记录 id）、`wait`、当前 `request`、`approved`、`answers`、`counters`、`progress`、`outcome`、`lease`、CAS 用的 `revision` |
+| `Budget` | `maxDecisions`、`maxActions`、`maxNoProgress`、`deadlineAt` |
+| `Guidance` | 带版本的人类判断标准：`criteria`、`escalate`、`author`。只作为数据进入 `DecisionRequest.guidance`，Jev 适配器放进 `state.guidance`。**它不是 `Policy`**：不能放宽授权，也不能替代它 |
+| `GoalEvaluator` | `evaluate({ intent, observation, records })` → `satisfied / unsatisfied / unreachable` + 证据。无默认实现；决策器的输出永远不会进入这个端口 |
+
+Run 只持久化可恢复的状态。observing、deciding、executing 只是 `step()` 内部的阶段，不写进 `status`：执行日志已经是“派发了什么”的唯一真相，Run 不保存第二份。
+
+## 2. 状态机
+
+```text
+active ──→ waiting        模型 wait，或派发后记录未终态
+active ──→ deliberating   无候选 / 模型 ask / 预算耗尽 / 无进展 / 恢复受阻 / 需要批准
+active ──→ completed      GoalEvaluator satisfied 且没有在途操作
+active ──→ failed         GoalEvaluator unreachable
+waiting ──→ active        任一等待条件成立（step 自查，或 deliver 唤醒）
+deliberating ──→ active   有效回应被应用；terminate 回应 → stopping / stopped
+{active, waiting, deliberating} ──→ paused ──→ active / deliberating
+任意非终态 ──→ stopping ──→ stopped     宿主 stop()；在途操作核对到终态后才 stopped
+```
+
+`completed / failed / stopped` 是终态。终态后的事件只记 `run.event.ignored`，回应返回 `run-terminal`。
+
+## 3. 一次 step 做什么
+
+每次 `step(runId)` 持有该 Run 的所有权租约，按固定顺序推进，**至多派发一个动作**：
+
+1. 对 `operations` 里每条未终态记录调用 `hub.reconcile()`。只查询，绝不重发。找不到兼容能力（`unavailable-capability` / `plugin-version-mismatch`）→ `deliberating`，请求 kind 为 `recovery`。journal 里不存在的记录说明进程死在“写入 Run 之后、claim 之前”，什么都没发生，直接从 `operations` 移除。
+2. `stopping` 的 Run 只做第 1 步；全部终态后变为 `stopped`。
+3. 观察一次状态。
+4. `waiting` 的 Run 检查等待条件：没有任何条件成立就直接返回 `waiting`，**不调用决策器**。只被时间条件唤醒且状态版本没变，`noProgress + 1`。
+5. 调用 `GoalEvaluator`。第一步就检查，所以“目标本来就已满足”不会产生任何动作。satisfied 但有在途操作 → 继续等待，不带着未知结果进入 completed。unreachable → `failed`。
+6. 有在途操作 → `waiting`。一次只有一个动作。
+7. 预算检查：截止时间、决策次数、动作次数、无进展次数，任一耗尽 → `deliberating`（kind `budget` / `no-progress`）。
+8. `hub.propose()`。wait → 登记 `state` + `time` 条件；deliberation → `deliberating`（kind `decision`）。
+9. `each-action` 模式下核对批准（见 §5）。
+10. 先把 operationId 与 `actions + 1` 写入 Run，再 `hub.execute(..., { live: true })`。派发被拒绝（撤权、状态变化、资源占用）→ 从 `operations` 移除，`noProgress + 1`，返回 `rejected`。记录未终态 → `waiting`；已终态 → `executed`。
+
+`StepResult.outcome` 取值：`idle`（终态或 paused）、`lease-held`、`waiting`、`executed`、`rejected`、`deliberating`、`completed`、`failed`、`stopped`。
+
+## 4. 等待与唤醒
+
+```ts
+type WaitCondition =
+  | { kind: 'execution'; recordId }    // 该记录进入终态
+  | { kind: 'deliberation'; requestId } // 该请求被有效回应（只能由 respond() 满足）
+  | { kind: 'state'; version }          // 观测版本不再等于 version
+  | { kind: 'time'; at };               // 到时
+```
+
+运行时总会加一个 `time` 上界（`waitMs`），所以没有开放式等待。模型的 `wait` 决定被翻译成 `[state: 当前版本, time: now + waitMs]`；Choice 协议不需要表达结构化条件，等待需求来自模型，唤醒条件由运行时登记。
+
+`deliver(runId, event)` 按 `event.key` 去重；`state-changed`、`execution-updated`（`data.recordId`）、`timer` 分别匹配对应条件，`host` 无条件唤醒。唤醒只把 `waiting` 改成 `active`，从不执行 step。宿主没有事件源时，定期对 `due()` 返回的 Run 调用 `step()` 也能工作，因为 step 自己会重新检查条件。
+
+## 5. 慢思考往返
+
+请求里带 `runId`、`kind` 和 `subject`：
+
+| kind | 何时 | subject |
+| --- | --- | --- |
+| `decision` | 没有候选、模型选择 ask、或内核决策失败 | `null` |
+| `approval` | `each-action` 模式下派发前 | 动作 digest、状态版本、能力、参数、资源 |
+| `budget` / `no-progress` | 预算耗尽 / 重复无进展 | 计数 |
+| `recovery` | 重启后找不到兼容的能力实现 | 记录 id 与原因码 |
+
+回应只有四类，不能混用：
+
+| kind | 效果 |
+| --- | --- |
+| `fact` | 只表示“宿主状态已更新，重新观察”。事实进入 Observation 的唯一途径是 StateProvider；`note` 仅供审计 |
+| `guidance` | 版本必须等于当前 + 1；替换 `Run.guidance`，下一步以新标准重新 propose。不能改变 Policy |
+| `approve` | 只回答 `approval` 请求；`digest` 与 `stateVersion` 必须与请求一致。批准存入 `Run.approved`，**下一步重新 propose**：只有新提案的动作 digest 相同、状态版本相同且未过期才派发，否则丢弃批准并重新请求。旧提案永远不会被直接执行 |
+| `terminate` | 终止；有在途操作先 `stopping`，核对到终态后 `stopped` |
+
+共同门控：`requestId` 必须等于当前开放请求，`intentRevision` 必须等于 Run 的意图修订，否则 `stale-response` 且 Run 不变。回应者的身份和权限由宿主在调用 `respond()` 之前认证；运行时看不到凭据。
+
+## 6. 预算与无进展
+
+`counters.signature` 记录上一次“状态版本 + 所选动作”（模型 wait 记为 `wait`）。签名相同 → `noProgress + 1`，不同 → 归零。时间唤醒但版本未变、派发被拒绝也各计一次。任一预算耗尽进入 `deliberating`；提高预算走宿主 `revise(runId, { budget })`，它会自动解除 `budget` 请求，其他请求仍需回应。
+
+## 7. 暂停、停止、修订
+
+- `pause()`：不再推进，`step()` 返回 `idle`。`resume()` 回到 active 重新观察；若有开放请求则回到 deliberating。paused 期间仍可 `respond()`。
+- `stop()`：不再 propose、不再派发。在途操作继续核对直到终态；**不撤销任何已发生的外部效果**。取消需要能力契约提供显式 cancel 端口，v0.2 没有。
+- `revise(runId, { intent | budget | guidance })`：意图修订必须保持 id 与作用域且 revision 递增；它使开放请求和批准失效，`noProgress` 归零，Run 回到 active。
+
+## 8. 持久化与恢复
+
+`RunStore` 只有五个方法：`create`（同一意图只允许一个未终态 Run）、`get`、`replace`（CAS，版本不符抛 `run-conflict`）、`markEvent`（事件去重）、`unsettled`。`MemoryRunStore` 的 `entries()/events()` 导出普通 JSON，构造函数重建；宿主决定落盘方式，`tests/runtime-worker.mjs` 演示了每次写入后落盘的文件存储。
+
+崩溃窗口与恢复策略：
+
+| 中断位置 | 重启后 |
+| --- | --- |
+| Run 写入 operationId 之前 | 什么都没发生，重新观察再决定 |
+| Run 写入之后、journal claim 之前 | journal 无此记录，从 `operations` 移除，不重发 |
+| claim 之后、回执落盘之前 | 记录 `submitted` 且 receipt 为 null，按 unknown 通过能力的 reconcile/verify 按幂等键查询 |
+| 回执之后、验证之前 | 继续 verify，不重新执行 |
+| 外部任务仍在运行 | 恢复跟踪，等待 |
+
+所有权租约：`step()` 开始时写入 `{ owner, expiresAt }`，结束时释放。其他 owner 持有且未过期 → `lease-held`；过期可接管；**同一 owner 重启后直接接管自己的租约**，这就是单工作进程的崩溃恢复。这不是分布式调度，也不做公平性。
+
+## 9. 事件
+
+`run.started`、`run.stepped`、`run.waiting`、`run.woken`、`run.deliberating`、`run.dispatch.rejected`、`run.response.applied / rejected`、`run.paused`、`run.resumed`、`run.revised`、`run.stopping`、`run.completed / failed / stopped`、`run.event.duplicate / ignored`。只含 id、状态与原因码，不含业务数据。
+
+## 10. 边界
+
+- 没有后台循环、没有节拍器：宿主调度。
+- 一次只处理一个动作；并行分支需要多个 Run。
+- 一个 Run 同一时刻只由一个 worker 推进；跨进程互斥依赖租约与 CAS，不是队列。
+- 终止不等于回滚；没有 cancel 端口。
+- 内存存储不持久；PostgreSQL 存储是下一步。
