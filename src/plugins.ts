@@ -43,6 +43,14 @@ export class PluginHost {
     });
   }
 
+  /** Remove an inactive mount so it can be reinstalled or replaced. start() never retries a failed plugin. */
+  uninstall(id: string): void {
+    ensure(!this.#starting, 'host-busy', 'Cannot uninstall during activation');
+    const status = this.#mounts.get(id)?.status;
+    ensure(status === 'installed' || status === 'stopped' || status === 'failed', 'plugin-state', 'Only inactive plugins can be uninstalled');
+    this.#mounts.delete(id);
+  }
+
   /** Stage a batch in dependency order and publish only after every setup succeeds. */
   async start(): Promise<void> {
     ensure(!this.#starting, 'host-busy', 'Activation already running');

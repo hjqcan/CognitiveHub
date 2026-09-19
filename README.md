@@ -50,7 +50,7 @@ Decision: proposal
 Default: dry-run
 Submitted: pending
 Verified: verified
-Retry duplicated: true
+Retry unchanged: true
 ```
 
 Jev 联网调用必须显式启用，会将示例状态发送到 TypeSafe，并可能产生 API 费用：
@@ -117,4 +117,4 @@ if (proposal.kind === 'proposal') {
 
 Hub 的模型概率不是动作成功率；插件描述不是授权；`live: true` 只是调用开关，不代替宿主授权。独立安全系统、资源所有权和最终原子性检查始终由宿主负责。
 
-执行超时属于“结果未知”，不等于“没有发生”。本实现不会自动重试执行动作。未知操作会持续持有本进程资源预留，直到通过插件查询并确认结果。
+执行超时属于“结果未知”，不等于“没有发生”。本实现不会自动重试执行动作。未知操作会持续持有本进程资源预留，直到 `reconcile()` 通过能力的独立证据确认结果。

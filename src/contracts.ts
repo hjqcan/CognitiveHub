@@ -73,9 +73,12 @@ export interface Capability {
   /** Revalidate local prerequisites; authoritative checks remain at the host. */
   check(context: ExecutionContext): Promise<boolean>;
   execute(context: ExecutionContext): Promise<Receipt>;
-  /** Query independent evidence; reconciliation may supply an accepted receipt and its handle. */
+  /**
+   * Query independent evidence. The receipt is only a hint: an accepted handle, or unknown when
+   * nothing reliable was recorded. Return pending unless the evidence is conclusive.
+   */
   verify(context: ExecutionContext, receipt: Receipt): Promise<Verification>;
-  /** Query unknown outcomes without resubmitting. Accepted receipts can use verify directly. */
+  /** Optional: recover a lost receipt (e.g. by idempotency key) without resubmitting. verify still confirms it. */
   reconcile?(context: ExecutionContext, receipt: Receipt | null): Promise<Receipt>;
 }
 export interface DecisionRequest {
@@ -91,6 +94,7 @@ export interface DecisionProvider {
   readonly name: string;
   decide(request: DecisionRequest, signal: AbortSignal): Promise<Decision>;
 }
+/** During propose, candidates is the whole bound set for this turn; during execute it is only the action. */
 export interface PolicyRequest extends DecisionRequest {
   readonly action: BoundAction;
   readonly phase: 'propose' | 'execute';
@@ -142,7 +146,8 @@ export interface ExecutionJournal {
   replace(record: ExecutionRecord, expectedRevision: number): Promise<void>;
 }
 export type ExecutionResult =
-  | { readonly kind: 'record'; readonly record: ExecutionRecord; readonly duplicate: boolean }
+  /** unchanged: this call wrote nothing, because the operation was already recorded or nothing new was learned. */
+  | { readonly kind: 'record'; readonly record: ExecutionRecord; readonly unchanged: boolean }
   | { readonly kind: 'dry-run'; readonly action: BoundAction }
   | { readonly kind: 'rejected'; readonly reason: string };
 export interface HubEvent {

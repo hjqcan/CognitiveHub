@@ -90,7 +90,7 @@ if (proposal.kind === 'proposal') {
   hostTasks.get(submitted.record.id).status = 'done'; // Simulated host feedback.
   const checked = await hub.reconcile(submitted.record.id);
   console.log('Verified:', checked.record.status);
-  console.log('Retry duplicated:', (await hub.execute(proposal.id, 'recovery-attempt-1', { live: true })).duplicate);
+  console.log('Retry unchanged:', (await hub.execute(proposal.id, 'recovery-attempt-1', { live: true })).unchanged);
 }
 console.log('Human requests:', inbox.pending().length, 'Events:', events.entries().length);
 await plugins.stop('gurki.recovery');

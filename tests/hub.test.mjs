@@ -23,7 +23,7 @@ test('operation retries return the existing record without repeating a side effe
   const f = await fixture(), p = await f.hub.propose(intent());
   const first = await f.hub.execute(p.id, 'stable-op', { live: true });
   const retry = await f.hub.execute(p.id, 'stable-op', { live: true });
-  assert.equal(retry.duplicate, true); assert.equal(retry.record.id, first.record.id); assert.equal(f.control.calls, 1);
+  assert.equal(retry.unchanged, true); assert.equal(retry.record.id, first.record.id); assert.equal(f.control.calls, 1);
 });
 test('one proposal cannot authorize multiple operations', async () => {
   const f = await fixture(), p = await f.hub.propose(intent());
@@ -119,7 +119,7 @@ test('unknown executor outcomes keep resources locked and are queried, not repla
   } });
   const p = await f.hub.propose(intent()), first = await f.hub.execute(p.id, 'op', { live: true });
   assert.equal(first.record.status, 'unknown');
-  assert.equal((await f.hub.execute(p.id, 'op', { live: true })).duplicate, true);
+  assert.equal((await f.hub.execute(p.id, 'op', { live: true })).unchanged, true);
   const other = await f.hub.propose(intent({ id: 'other-task' }));
   assert.equal((await f.hub.execute(other.id, 'other-op', { live: true })).kind, 'rejected');
   assert.equal((await f.hub.reconcile(first.record.id)).record.status, 'verified'); assert.equal(calls, 1);
@@ -160,7 +160,7 @@ test('journal failure after dispatch is surfaced and does not release the task l
   const p = await f.hub.propose(intent());
   await assert.rejects(f.hub.execute(p.id, 'op', { live: true }), /storage down/);
   assert.equal(f.control.calls, 1); assert.equal(f.journal.entries()[0].status, 'submitted');
-  assert.equal((await f.hub.execute(p.id, 'op', { live: true })).duplicate, true);
+  assert.equal((await f.hub.execute(p.id, 'op', { live: true })).unchanged, true);
 });
 test('a human request is not itself execution approval', async () => {
   const f = await fixture({ hub: { decision: { name: 'ask', decide: async () => ({ kind: 'deliberate', reason: 'Need a new plan' }) } } });
@@ -291,3 +291,49 @@ for (const phase of ['execute', 'verify', 'reconcile']) {
     assert.ok(f.events.entries().some(e => e.type === 'execution.lease.released'));
   });
 }
+
+test('policy judges each proposed action against the whole bound candidate set', async () => {
+  const seen = [];
+  const f = await fixture({
+    capability: { prepare: async () => ['a', 'b'].map(key => ({ key, description: key, input: { robotId: 'R01' }, resources: ['robot:R01'] })) },
+    hub: { policy: { check: async ({ phase, candidates }) => {
+      seen.push([phase, candidates.length]); return { allowed: true, version: 'p1', reason: 'test' }; } } },
+  });
+  const p = await f.hub.propose(intent());
+  assert.equal((await f.hub.execute(p.id, 'op', { live: true })).record.status, 'verified');
+  assert.deepEqual(seen, [['propose', 2], ['propose', 2], ['execute', 1], ['execute', 1]]);
+});
+
+test('an unknown outcome without a query hook is resolved only by independent evidence', async () => {
+  let visible = false; const receipts = [];
+  const f = await fixture({ capability: {
+    execute: async () => { throw new Error('reply lost'); },
+    verify: async (_context, receipt) => { receipts.push(receipt.status);
+      return visible ? { status: 'verified', evidence: { seen: true } } : { status: 'pending', evidence: { seen: false } }; },
+  } });
+  const p = await f.hub.propose(intent()), first = await f.hub.execute(p.id, 'op', { live: true });
+  assert.equal(first.record.status, 'unknown');
+  assert.equal((await f.hub.reconcile(first.record.id)).record.status, 'unknown');
+  const other = await f.hub.propose(intent({ id: 'other-task' }));
+  assert.equal((await f.hub.execute(other.id, 'other-op', { live: true })).kind, 'rejected');
+  visible = true;
+  assert.equal((await f.hub.reconcile(first.record.id)).record.status, 'verified');
+  assert.deepEqual(receipts, ['unknown', 'unknown']);
+  const second = await f.hub.execute(other.id, 'other-op', { live: true });
+  assert.equal(second.record.status, 'unknown'); // The lock is free again; this executor also loses its reply.
+  assert.equal((await f.hub.reconcile(second.record.id)).record.status, 'verified');
+  await f.plugins.stop('robot');
+});
+
+test('a receipt lost to journal failure is reconciled as unknown and confirmed by evidence', async () => {
+  const f = await fixture(); const replace = f.journal.replace.bind(f.journal);
+  f.journal.replace = async () => { throw new Error('storage down'); };
+  const p = await f.hub.propose(intent());
+  await assert.rejects(f.hub.execute(p.id, 'op', { live: true }), /storage down/);
+  f.journal.replace = replace;
+  const r = await f.hub.reconcile(f.journal.entries()[0].id);
+  assert.equal(r.record.status, 'verified'); assert.equal(r.unchanged, false);
+  assert.equal(f.control.calls, 1); assert.equal(f.control.verifyCalls, 1);
+  assert.equal((await f.hub.reconcile(r.record.id)).unchanged, true);
+  await f.plugins.stop('robot');
+});

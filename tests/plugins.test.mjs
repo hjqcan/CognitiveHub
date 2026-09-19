@@ -178,3 +178,17 @@ for (const fail of [false, true]) test(`staged services can resolve dependencies
   else { await host.start(); await host.stop('consumer'); await host.stop('forward'); await host.stop('base'); }
   assert.equal(cleaned, true);
 });
+
+test('inactive plugins can be uninstalled; a failed module no longer blocks the next activation', async () => {
+  const host = new PluginHost(); let boots = 0;
+  host.install(plugin('healthy', () => {}));
+  host.install(plugin('flaky', () => { if (++boots === 1) throw new Error('boot failed'); }));
+  await assert.rejects(host.start(), /boot failed/);
+  assert.equal(host.status('flaky'), 'failed'); assert.equal(host.status('healthy'), 'stopped');
+  host.uninstall('flaky'); await host.start();
+  assert.equal(host.status('flaky'), undefined); assert.equal(host.status('healthy'), 'active');
+  assert.throws(() => host.uninstall('healthy'), { code: 'plugin-state' });
+  host.install(plugin('flaky', () => { boots++; })); await host.start();
+  assert.equal(host.status('flaky'), 'active'); assert.equal(boots, 2);
+  await host.stop('flaky'); host.uninstall('flaky'); await host.stop('healthy');
+});

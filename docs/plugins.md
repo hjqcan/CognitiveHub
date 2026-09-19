@@ -47,7 +47,7 @@ setup 结束后贡献窗口关闭。不要保留 ctx 在后台异步注册能力
 | `check` | 执行前重查确定性前置条件，无副作用 |
 | `execute` | 通过宿主提交动作，传递 idempotencyKey/预期版本 |
 | `verify` | 查询独立效果证据，不能只把 HTTP 200 当作 verified |
-| `reconcile` | 可选；查询旧请求结果，不重新执行命令 |
+| `reconcile` | 可选；按幂等键或句柄找回丢失的回执，不重新执行命令。结果仍交给 verify 确认 |
 
 候选 `key` 在一个能力的一次 prepare 结果中唯一。input 必须是普通 JSON；resources 是宿主定义的规范资源 ID。写能力必须占用资源。坐标系、单位、精度、取消和完成语义应写进实际领域契约，不要仅靠“统一参数名”。
 
@@ -60,7 +60,7 @@ setup 结束后贡献窗口关闭。不要保留 ctx 在后台异步注册能力
 - failed：执行端确认该操作已终止且结果为失败；不代表自动回滚。
 - unknown：无法确定真实效果，必须查询或由宿主处理。
 
-初次收到 accepted 时保持 pending。后续 `Hub.reconcile()` 会先调用可选的能力 reconcile，再对 accepted/completed 回执调用 verify；没有能力 reconcile 时，verify 可直接使用原 accepted 回执的 handle 查询效果。只有独立证据确认 verified/failed 才进入终态，证据不足返回 pending。unknown 仍需要查询旧操作来恢复，不能靠重新执行来核对。
+初次收到 accepted 时保持 pending。后续 `Hub.reconcile()` 会先调用可选的能力 reconcile 找回回执，再对任何未终结的结果调用 verify：accepted 的 handle、completed，以及 unknown；回执从未记录成功的 submitted 记录会以 unknown 回执交给 verify。verify 必须依据独立证据判断：确认 verified/failed 才进入终态，证据不足返回 pending，此时 unknown 仍保持 unknown 并继续占用资源。因此写能力不实现 reconcile 也能从未知结果恢复，前提是 verify 真正查询效果，而不是只看回执。
 
 无法判断是否有副作用时返回 unknown，不要返回 failed。execute 抛错/超时/返回非法结构也按 unknown 处理。验证码、自由文本、运动规划等缺失内容应由慢思考或相应能力提供，不让 Jev 编造。
 
@@ -70,11 +70,11 @@ setup 结束后贡献窗口关闭。不要保留 ctx 在后台异步注册能力
 
 `stop(pluginId)` 先让能力不可见，再等待既有 lease。pending/unknown 期间它可能持续等待，这是保护，不是强行杀掉任务的超时。操作进入终态后，尚未实际结束的 execute/verify/reconcile 回调仍持有插件租约；超时和 AbortSignal 不代表这些回调已退出。
 
-插件在异步 dispose 完成前持续处于 draining，其依赖提供者不能停止，也不能重新激活该插件。清理成功后才变为 stopped；清理失败进入 failed。
+插件在异步 dispose 完成前持续处于 draining，其依赖提供者不能停止，也不能重新激活该插件。清理成功后才变为 stopped；清理失败进入 failed。`start()` 不会重试 failed 模块；用 `uninstall(pluginId)` 移除 installed/stopped/failed 的挂载后重新 install，才是显式的重试或替换路径。active/draining 的模块不能卸载。
 
 先核对/终结任务，再停用。不要在 dispose 中发送紧急停机、自动补偿或撤销用户业务操作。
 
-存在 active/draining 依赖者时，不能停止其服务提供者。相同版本重新激活也会增加 activation；此前提案不可继续用。首版不支持升级运行中的二进制/模块实例，也不提供卸载第三方包文件的 API。
+存在 active/draining 依赖者时，不能停止其服务提供者。相同版本重新激活也会增加 activation；此前提案不可继续用。首版不支持升级运行中的模块实例；`uninstall` 只移除挂载，不删除第三方包文件。
 
 ## 信任边界
 

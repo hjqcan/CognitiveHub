@@ -17,7 +17,7 @@
 
 ## 2. 三种独立生命周期
 
-**插件**：`installed → starting → active → draining → stopped`，激活或清理失败进入 `failed`。依赖通过版本化服务名声明；不做动态 semver 求解，也不兼容 Cordis/dsh ABI。
+**插件**：`installed → starting → active → draining → stopped`，激活或清理失败进入 `failed`。`start()` 只激活 installed/stopped 的模块，不会自动重试 failed；`uninstall()` 移除任何未激活的挂载，之后可以重新 install 同名或替换实现。依赖通过版本化服务名声明；不做动态 semver 求解，也不兼容 Cordis/dsh ABI。
 
 一个启动批次在所有 setup 成功后统一对外可见；批次内部可以访问已完成 setup 的依赖。回滚不会暴露可被 Hub 获取的新能力。draining 持续到租约排空且所有 disposer 完成，在此期间拒绝新的依赖消费者和重新激活。
 
@@ -31,13 +31,13 @@ submitted ──→ pending ──→ verified
     └──────→ unknown ──→ pending / verified / failed
 ```
 
-`accepted` 仅表示远端受理，首次提交后停在 pending；后续 reconcile 会用 verifier 核对 accepted/completed 回执，没有能力 reconcile 时也可通过 accepted 的 handle 验证。`completed` 仍须调用 verifier。核验无法完成时保持 pending；未知结果不自动重放。terminal 表示这个动作的观察结果已确定，不表示用户的整体目标已经完成。
+`accepted` 仅表示远端受理，首次提交后停在 pending；`completed` 立即调用 verifier，核验无法完成时仍只是 pending。`reconcile()` 先调用可选的能力 reconcile 找回回执，再对任何未终结的结果调用 verifier：accepted、completed、unknown，以及回执从未记录成功的 submitted（按 unknown 处理）。证据不足时状态保持不变，unknown 仍是 unknown；未知结果不自动重放。terminal 表示这个动作的观察结果已确定，不表示用户的整体目标已经完成。
 
 ## 3. 决策与权限
 
 `Intent.capabilities` 是请求使用的能力，不是授予的权限。`Policy` 是必选宿主端口，无默认 allow-all。它需要检查当前用户、意图修订、授权、资源所有权及业务限制。
 
-候选经过意图能力白名单、插件作用域和宿主策略过滤。模型只能选择实际候选、等待或请求慢思考。Hub 不会把被拒绝的动作偷偷转换成另一动作。
+候选经过意图能力白名单、插件作用域和宿主策略过滤。所有能力先完成绑定与校验，`maxCandidates` 限制的是这一步的总量；随后策略逐个裁决，每次都能看到本轮完整的候选集合。模型只能选择实际候选、等待或请求慢思考。Hub 不会把被拒绝的动作偷偷转换成另一动作。
 
 执行前重新观察状态、检查策略版本、校验参数和前置条件；异步前置检查之后再核对授权。等待 journal claim 后、实际派发前，同时检查提案和本次新观测的有效期；过期则记录未派发失败并释放资源。模型、候选、提案和记录采用不可变快照，不能靠修改公开返回对象改变提交参数。
 

@@ -18,8 +18,8 @@ TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexed
 
 | 文件 | 验证内容 |
 | --- | --- |
-| plugins.test.mjs | 依赖顺序、启动批次隔离、失败回滚、LIFO 清理、服务声明、作用域、drain、异步清理与重新激活 |
-| hub.test.mjs | 默认预览、授权、claim 后过期、单飞、幂等、资源锁、未知结果、accepted 核验、迟到回调租约、不可变快照、故障 |
+| plugins.test.mjs | 依赖顺序、启动批次隔离、失败回滚、LIFO 清理、服务声明、作用域、drain、异步清理与重新激活、卸载与重装 |
+| hub.test.mjs | 默认预览、授权、策略候选全集、claim 后过期、单飞、幂等、资源锁、未知结果、无查询钩子的证据核验、accepted 核验、迟到回调租约、不可变快照、故障 |
 | jev.test.mjs | 实际 HTTP shape、候选映射、概率校验、错误脱敏、deadline、体积限制 |
 | examples.test.mjs | 两个不同宿主使用相同内核，不联网即可完成模拟闭环 |
 

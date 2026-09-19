@@ -119,8 +119,7 @@ export class CognitiveHub {
           const observation = this.#observation(await this.#options.state.observe(intent, signal));
           stateVersion = observation.version;
           signal.throwIfAborted();
-          const candidates: BoundAction[] = [];
-          const policyVersions = new Map<string, string>();
+          const prepared: BoundAction[] = [];
           for (const registration of this.#options.plugins.list(intent.scope)) {
             if (!intent.capabilities.includes(registration.capability.id)) continue;
             const lease = this.#options.plugins.acquire(registration.pluginId,
@@ -140,19 +139,23 @@ export class CognitiveHub {
               ensure(new Set(draft.resources).size === draft.resources.length &&
                 (capability.effect === 'read' || draft.resources.length > 0), 'invalid-candidate', 'Writes require unique resource IDs');
               capability.validate(draft.input);
-              const action: BoundAction = immutable({ ...draft,
+              prepared.push(immutable({ ...draft,
                 id: canonical([registration.pluginId, registration.activation, capability.id, draft.key]),
                 pluginId: registration.pluginId, pluginVersion: registration.pluginVersion,
                 activation: registration.activation, capability: capability.id,
                 effect: capability.effect, scope: intent.scope,
-              });
-              const policy = await this.#options.policy.check({ intent, observation,
-                candidates: [action], action, phase: 'propose' }, signal);
-              signal.throwIfAborted(); identifier(policy.version, 'policy version');
-              if (policy.allowed !== true) continue;
-              candidates.push(action); policyVersions.set(action.id, policy.version);
-              ensure(candidates.length <= this.#maxCandidates, 'candidate-limit', 'Too many candidates; narrow the capability adapters');
+              }));
+              ensure(prepared.length <= this.#maxCandidates, 'candidate-limit', 'Too many candidates; narrow the capability adapters');
             }
+          }
+          // Policy judges each action against the whole bound set, not one candidate at a time.
+          const candidates: BoundAction[] = [];
+          const policyVersions = new Map<string, string>();
+          for (const action of prepared) {
+            const policy = await this.#options.policy.check({ intent, observation, candidates: prepared, action, phase: 'propose' }, signal);
+            signal.throwIfAborted(); identifier(policy.version, 'policy version');
+            if (policy.allowed !== true) continue;
+            candidates.push(action); policyVersions.set(action.id, policy.version);
           }
           if (!candidates.length) return { kind: 'deliberate' as const, reason: 'No authorized, applicable capability candidates' };
           const request: DecisionRequest = immutable({ intent, observation, candidates });
@@ -210,7 +213,7 @@ export class CognitiveHub {
     try {
       const existing = await this.journal.get(id);
       if (existing) return existing.fingerprint === fingerprint
-        ? { kind: 'record', record: existing, duplicate: true }
+        ? { kind: 'record', record: existing, unchanged: true }
         : { kind: 'rejected', reason: 'Operation ID already belongs to another action' };
       ensure(proposal.expiresAt > this.#now(), 'stale-proposal', 'Proposal has expired');
       lease = this.#options.plugins.acquire(action.pluginId, action.capability, action.activation, intent.scope);
@@ -242,7 +245,7 @@ export class CognitiveHub {
       let record: ExecutionRecord = immutable({ id, revision: 0, operationId, fingerprint, intent,
         observation: context.observation, action, status: 'submitted', receipt: null, evidence: null });
       const claim = await this.journal.claim(record);
-      if (claim.kind === 'existing') return { kind: 'record', record: claim.record, duplicate: true };
+      if (claim.kind === 'existing') return { kind: 'record', record: claim.record, unchanged: true };
       if (claim.kind === 'conflict') return { kind: 'rejected', reason: claim.reason };
       // Retain the plugin and resources until a terminal result is durably recorded.
       retained = true;
@@ -269,7 +272,7 @@ export class CognitiveHub {
         }
       }
       record = await this.#settle(record, receipt);
-      return { kind: 'record', record, duplicate: false };
+      return { kind: 'record', record, unchanged: false };
     } catch (error) {
       if (retained) throw error; // Journal failures must never masquerade as a safely rejected action.
       return { kind: 'rejected', reason: error instanceof Error ? error.message : 'Preflight failed' };
@@ -334,12 +337,14 @@ export class CognitiveHub {
     }
     return next;
   }
+  /** Record the receipt, then confirm any open outcome against independent evidence. */
   async #settle(record: ExecutionRecord, receipt: Receipt,
-    options: { verifyAccepted?: boolean; signal?: AbortSignal } = {}): Promise<ExecutionRecord> {
-    if (receipt.status === 'unknown') return this.#replace(record, { status: 'unknown', receipt });
+    options: { verify?: boolean; signal?: AbortSignal } = {}): Promise<ExecutionRecord> {
     if (receipt.status === 'failed') return this.#replace(record, { status: 'failed', receipt, evidence: receipt.evidence });
-    record = await this.#replace(record, { status: 'pending', receipt });
-    if (receipt.status === 'accepted' && !options.verifyAccepted) return record;
+    const status = receipt.status === 'unknown' ? 'unknown' : 'pending';
+    record = await this.#replace(record, { status, receipt });
+    // Dispatch verifies completed receipts right away; reconciliation verifies accepted and unknown ones too.
+    if (!options.verify && receipt.status !== 'completed') return record;
     const pending = this.#pending.get(record.id)!;
     let verification: Verification;
     try {
@@ -349,28 +354,30 @@ export class CognitiveHub {
       ensure(['verified', 'pending', 'failed'].includes(verification.status), 'invalid-verification', 'Invalid verifier status');
       assertJson(verification.evidence);
     } catch { return record; } // Completed execution is not verified completion.
-    return this.#replace(record, { status: verification.status, evidence: verification.evidence });
+    // Inconclusive evidence changes nothing: an unknown outcome stays unknown.
+    return this.#replace(record, { status: verification.status === 'pending' ? status : verification.status, evidence: verification.evidence });
   }
 
+  /** Query and independently verify an open outcome. Never resubmits. */
   async reconcile(id: string, options: { signal?: AbortSignal } = {}): Promise<ExecutionResult> {
     if (this.#executing.has(id)) return { kind: 'rejected', reason: 'Operation is already being handled' };
     this.#executing.add(id);
     try {
       const record = await this.journal.get(id);
       if (!record) return { kind: 'rejected', reason: 'Unknown operation' };
-      if (terminal(record.status)) return { kind: 'record', record, duplicate: true };
+      if (terminal(record.status)) return { kind: 'record', record, unchanged: true };
       const pending = this.#pending.get(id);
       if (!pending) return { kind: 'rejected', reason: 'Recovery requires the original runtime; persistent recovery is not implemented' };
       const capability = pending.lease.registration.capability;
-      let receipt = record.receipt;
+      // A dispatched action whose receipt was never recorded is an unknown outcome, not a fresh one.
+      let receipt: Receipt = record.receipt ?? { status: 'unknown', reason: 'No receipt was recorded' };
       if (capability.reconcile) {
         try {
           receipt = this.#receipt(await this.#invoke(pending, 'reconcile', options.signal,
             signal => capability.reconcile!({ ...pending.context, signal }, record.receipt)));
-        } catch { return { kind: 'record', record, duplicate: true }; }
+        } catch { return { kind: 'record', record, unchanged: true }; }
       }
-      if (!receipt) return { kind: 'record', record, duplicate: true };
-      return { kind: 'record', record: await this.#settle(record, receipt, { ...options, verifyAccepted: true }), duplicate: false };
+      return { kind: 'record', record: await this.#settle(record, receipt, { ...options, verify: true }), unchanged: false };
     } finally { this.#executing.delete(id); }
   }
 }
