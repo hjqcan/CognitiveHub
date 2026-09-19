@@ -164,11 +164,7 @@ export class PluginHost {
     validScope(scope);
     return this.#capabilities.filter(r => this.#mounts.get(r.pluginId)?.status === 'active' && visible(r.scope, scope));
   }
-  acquire(pluginId: string, capabilityId: string, activation: number, scope: Scope): CapabilityLease {
-    const mount = this.#mounts.get(pluginId);
-    const registration = this.list(scope).find(r => r.pluginId === pluginId &&
-      r.capability.id === capabilityId && r.activation === activation);
-    ensure(mount && registration, 'unavailable-capability', 'Capability was removed, replaced, or is outside scope');
+  #lease(mount: Mount, registration: CapabilityRegistration): CapabilityLease {
     mount.leases++;
     let released = false;
     return { registration, release: () => {
@@ -176,6 +172,27 @@ export class PluginHost {
       released = true; mount.leases--;
       if (mount.leases === 0) mount.drained?.();
     } };
+  }
+  /** Lease one specific activation, as bound by a proposal made in this process. */
+  acquire(pluginId: string, capabilityId: string, activation: number, scope: Scope): CapabilityLease {
+    const mount = this.#mounts.get(pluginId);
+    const registration = this.list(scope).find(r => r.pluginId === pluginId &&
+      r.capability.id === capabilityId && r.activation === activation);
+    ensure(mount && registration, 'unavailable-capability', 'Capability was removed, replaced, or is outside scope');
+    return this.#lease(mount, registration);
+  }
+  /**
+   * Lease the active activation of an exact plugin version, for a record persisted by an earlier process.
+   * Query-only use (reconcile/verify): the activation that dispatched the action no longer exists.
+   */
+  rebind(pluginId: string, pluginVersion: string, capabilityId: string, scope: Scope): CapabilityLease {
+    const mount = this.#mounts.get(pluginId);
+    const registration = this.list(scope).find(r => r.pluginId === pluginId && r.capability.id === capabilityId);
+    ensure(mount && registration, 'unavailable-capability',
+      `Capability ${capabilityId} of plugin ${pluginId} is ${mount?.status ?? 'not installed'} or outside scope`);
+    ensure(registration.pluginVersion === pluginVersion, 'plugin-version-mismatch',
+      `Record requires ${pluginId}@${pluginVersion}; the active version is ${registration.pluginVersion}`);
+    return this.#lease(mount, registration);
   }
   status(id: string): Status | undefined { return this.#mounts.get(id)?.status; }
 

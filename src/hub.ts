@@ -6,7 +6,9 @@ import type {
 import type { CapabilityLease } from './plugins.js';
 import { PluginHost } from './plugins.js';
 import { MemoryJournal, terminal } from './memory.js';
-import { assertJson, bounded, canonical, ensure, HubError, identifier, immutable, newId, validScope } from './primitives.js';
+import {
+  actionIdentity, assertJson, assertReceipt, assertRecord, bounded, canonical, ensure, HubError, identifier, immutable, newId, validScope,
+} from './primitives.js';
 
 interface Proposal {
   id: string;
@@ -23,6 +25,7 @@ interface Pending {
   callbacks: number;
   terminal: boolean;
 }
+type Patch = Partial<Pick<ExecutionRecord, 'status' | 'receipt' | 'evidence'>>;
 export interface HubOptions {
   plugins: PluginHost;
   state: StateProvider;
@@ -39,6 +42,7 @@ export interface HubOptions {
   maxProposals?: number;
   now?: () => number;
 }
+const rejected = (code: string, reason: string): ExecutionResult => ({ kind: 'rejected', code, reason });
 
 /** One bounded turn at a time. The host owns scheduling, goals, authority and physical safety. */
 export class CognitiveHub {
@@ -139,8 +143,9 @@ export class CognitiveHub {
               ensure(new Set(draft.resources).size === draft.resources.length &&
                 (capability.effect === 'read' || draft.resources.length > 0), 'invalid-candidate', 'Writes require unique resource IDs');
               capability.validate(draft.input);
+              // Plugin IDs are unique per host and keys per capability, so the id needs no activation to be unique.
               prepared.push(immutable({ ...draft,
-                id: canonical([registration.pluginId, registration.activation, capability.id, draft.key]),
+                id: canonical([registration.pluginId, capability.id, draft.key]),
                 pluginId: registration.pluginId, pluginVersion: registration.pluginVersion,
                 activation: registration.activation, capability: capability.id,
                 effect: capability.effect, scope: intent.scope,
@@ -197,14 +202,15 @@ export class CognitiveHub {
     options: { live?: boolean; signal?: AbortSignal } = {}): Promise<ExecutionResult> {
     identifier(operationId, 'operation id');
     const proposal = this.#proposals.get(proposalId);
-    if (!proposal) return { kind: 'rejected', reason: 'Unknown or discarded proposal' };
+    if (!proposal) return rejected('unknown-proposal', 'Unknown or discarded proposal');
     const { intent, action } = proposal;
     const id = canonical([intent.scope, intent.id, operationId]);
-    const fingerprint = canonical({ intent, action });
-    if (this.#executingProposals.has(proposalId)) return { kind: 'rejected', reason: 'Proposal is already being handled' };
+    // Identity excludes the process-local activation, so a retry after a restart finds its own record.
+    const fingerprint = canonical({ intent, action: actionIdentity(action) });
+    if (this.#executingProposals.has(proposalId)) return rejected('busy', 'Proposal is already being handled');
     if (this.#consumed.has(proposalId) && this.#consumed.get(proposalId) !== id)
-      return { kind: 'rejected', reason: 'Proposal already belongs to another operation' };
-    if (this.#executing.has(id)) return { kind: 'rejected', reason: 'Operation is already being handled' };
+      return rejected('proposal-consumed', 'Proposal already belongs to another operation');
+    if (this.#executing.has(id)) return rejected('busy', 'Operation is already being handled');
     this.#executing.add(id);
     this.#executingProposals.add(proposalId);
     let preflight: Promise<ExecutionContext> | undefined;
@@ -214,7 +220,7 @@ export class CognitiveHub {
       const existing = await this.journal.get(id);
       if (existing) return existing.fingerprint === fingerprint
         ? { kind: 'record', record: existing, unchanged: true }
-        : { kind: 'rejected', reason: 'Operation ID already belongs to another action' };
+        : rejected('operation-mismatch', 'Operation ID already belongs to another action');
       ensure(proposal.expiresAt > this.#now(), 'stale-proposal', 'Proposal has expired');
       lease = this.#options.plugins.acquire(action.pluginId, action.capability, action.activation, intent.scope);
       const capability = lease.registration.capability;
@@ -242,11 +248,13 @@ export class CognitiveHub {
         this.#emit('execution.previewed', { proposalId, operationId });
         return { kind: 'dry-run', action };
       }
+      const created = this.#now();
       let record: ExecutionRecord = immutable({ id, revision: 0, operationId, fingerprint, intent,
-        observation: context.observation, action, status: 'submitted', receipt: null, evidence: null });
+        observation: context.observation, action, status: 'submitted', receipt: null, evidence: null,
+        createdAt: created, updatedAt: created });
       const claim = await this.journal.claim(record);
       if (claim.kind === 'existing') return { kind: 'record', record: claim.record, unchanged: true };
-      if (claim.kind === 'conflict') return { kind: 'rejected', reason: claim.reason };
+      if (claim.kind === 'conflict') return rejected('claim-conflict', claim.reason);
       // Retain the plugin and resources until a terminal result is durably recorded.
       retained = true;
       this.#consumed.set(proposalId, id);
@@ -275,7 +283,8 @@ export class CognitiveHub {
       return { kind: 'record', record, unchanged: false };
     } catch (error) {
       if (retained) throw error; // Journal failures must never masquerade as a safely rejected action.
-      return { kind: 'rejected', reason: error instanceof Error ? error.message : 'Preflight failed' };
+      return rejected(error instanceof HubError ? error.code : 'preflight-failed',
+        error instanceof Error ? error.message : 'Preflight failed');
     } finally {
       if (!retained) {
         const acquired = lease;
@@ -287,12 +296,8 @@ export class CognitiveHub {
     }
   }
 
-  #receipt(value: Receipt): Receipt {
-    assertJson(value);
-    ensure(['accepted', 'completed', 'failed', 'unknown'].includes(value.status), 'invalid-receipt', 'Unknown receipt status');
-    if (value.status === 'accepted') identifier(value.handle, 'task handle');
-    if (value.status === 'failed' || value.status === 'unknown') identifier(value.reason, 'receipt reason');
-    if (value.status !== 'unknown') assertJson(value.evidence);
+  #receipt(value: unknown): Receipt {
+    assertReceipt(value);
     return immutable(value);
   }
 
@@ -302,6 +307,27 @@ export class CognitiveHub {
     pending.lease.release();
     this.#pending.delete(id);
     this.#emit('execution.lease.released', { id });
+  }
+  /** The record reached a terminal state (here or elsewhere); drop this process's hold on it once callbacks settle. */
+  #settleLocal(id: string): void {
+    const pending = this.#pending.get(id);
+    if (pending) { pending.terminal = true; this.#releasePending(pending); }
+  }
+
+  /**
+   * Re-bind a record persisted by an earlier process to the active plugin of the exact same version.
+   * Query-only: the lease serves reconcile/verify, never execute. Failing to bind leaves the record and its reservations untouched.
+   */
+  #adopt(record: ExecutionRecord): Pending {
+    const { intent, observation, action, operationId } = record;
+    const lease = this.#options.plugins.rebind(action.pluginId, action.pluginVersion, action.capability, intent.scope);
+    // AbortSignal cannot be cloned; #invoke substitutes its own bounded signal for every callback.
+    const context: ExecutionContext = Object.freeze({ intent, observation, action, operationId,
+      idempotencyKey: record.id, signal: new AbortController().signal });
+    const pending: Pending = { lease, context, callbacks: 0, terminal: false };
+    this.#pending.set(record.id, pending);
+    this.#emit('execution.recovered', { id: record.id, pluginId: action.pluginId, pluginVersion: action.pluginVersion });
+    return pending;
   }
 
   /** A deadline ends waiting; each actual callback keeps the plugin alive until it settles. */
@@ -327,22 +353,25 @@ export class CognitiveHub {
     }
   }
 
-  async #replace(record: ExecutionRecord, patch: Partial<Pick<ExecutionRecord, 'status' | 'receipt' | 'evidence'>>): Promise<ExecutionRecord> {
-    const next = immutable({ ...record, ...patch, revision: record.revision + 1 });
+  async #replace(record: ExecutionRecord, patch: Patch): Promise<ExecutionRecord> {
+    const next = immutable({ ...record, ...patch, revision: record.revision + 1, updatedAt: this.#now() });
     await this.journal.replace(next, record.revision);
     this.#emit('execution.updated', { id: next.id, status: next.status });
-    if (terminal(next.status)) {
-      const pending = this.#pending.get(next.id);
-      if (pending) { pending.terminal = true; this.#releasePending(pending); }
-    }
+    if (terminal(next.status)) this.#settleLocal(next.id);
     return next;
+  }
+  /** Skip revisions that change nothing, so polling reconciliation never inflates the journal. */
+  async #write(record: ExecutionRecord, patch: Patch): Promise<ExecutionRecord> {
+    const next = { ...record, ...patch };
+    const same = (['status', 'receipt', 'evidence'] as const).every(key => canonical(record[key]) === canonical(next[key]));
+    return same ? record : this.#replace(record, patch);
   }
   /** Record the receipt, then confirm any open outcome against independent evidence. */
   async #settle(record: ExecutionRecord, receipt: Receipt,
     options: { verify?: boolean; signal?: AbortSignal } = {}): Promise<ExecutionRecord> {
-    if (receipt.status === 'failed') return this.#replace(record, { status: 'failed', receipt, evidence: receipt.evidence });
+    if (receipt.status === 'failed') return this.#write(record, { status: 'failed', receipt, evidence: receipt.evidence });
     const status = receipt.status === 'unknown' ? 'unknown' : 'pending';
-    record = await this.#replace(record, { status, receipt });
+    record = await this.#write(record, { status, receipt });
     // Dispatch verifies completed receipts right away; reconciliation verifies accepted and unknown ones too.
     if (!options.verify && receipt.status !== 'completed') return record;
     const pending = this.#pending.get(record.id)!;
@@ -355,19 +384,32 @@ export class CognitiveHub {
       assertJson(verification.evidence);
     } catch { return record; } // Completed execution is not verified completion.
     // Inconclusive evidence changes nothing: an unknown outcome stays unknown.
-    return this.#replace(record, { status: verification.status === 'pending' ? status : verification.status, evidence: verification.evidence });
+    return this.#write(record, { status: verification.status === 'pending' ? status : verification.status, evidence: verification.evidence });
   }
 
-  /** Query and independently verify an open outcome. Never resubmits. */
+  /**
+   * Query and independently verify an open outcome. Never resubmits.
+   * Records left open by an earlier process are re-bound to the same plugin version first; a journal is driven by one hub at a time.
+   */
   async reconcile(id: string, options: { signal?: AbortSignal } = {}): Promise<ExecutionResult> {
-    if (this.#executing.has(id)) return { kind: 'rejected', reason: 'Operation is already being handled' };
+    if (this.#executing.has(id)) return rejected('busy', 'Operation is already being handled');
     this.#executing.add(id);
     try {
-      const record = await this.journal.get(id);
-      if (!record) return { kind: 'rejected', reason: 'Unknown operation' };
-      if (terminal(record.status)) return { kind: 'record', record, unchanged: true };
-      const pending = this.#pending.get(id);
-      if (!pending) return { kind: 'rejected', reason: 'Recovery requires the original runtime; persistent recovery is not implemented' };
+      const stored = await this.journal.get(id);
+      if (!stored) return rejected('unknown-operation', 'Unknown operation');
+      assertRecord(stored);
+      const record = immutable(stored);
+      if (terminal(record.status)) { this.#settleLocal(id); return { kind: 'record', record, unchanged: true }; }
+      let adopted = this.#pending.get(id);
+      if (!adopted) {
+        try { adopted = this.#adopt(record); }
+        catch (error) {
+          const code = error instanceof HubError ? error.code : 'unavailable-capability';
+          this.#emit('execution.recovery.blocked', { id, code });
+          return rejected(code, error instanceof Error ? error.message : 'Recovery binding failed');
+        }
+      }
+      const pending = adopted;
       const capability = pending.lease.registration.capability;
       // A dispatched action whose receipt was never recorded is an unknown outcome, not a fresh one.
       let receipt: Receipt = record.receipt ?? { status: 'unknown', reason: 'No receipt was recorded' };
@@ -375,9 +417,18 @@ export class CognitiveHub {
         try {
           receipt = this.#receipt(await this.#invoke(pending, 'reconcile', options.signal,
             signal => capability.reconcile!({ ...pending.context, signal }, record.receipt)));
-        } catch { return { kind: 'record', record, unchanged: true }; }
+        } catch { return rejected('reconcile-failed', 'Outcome query failed; the record is unchanged'); }
       }
-      return { kind: 'record', record: await this.#settle(record, receipt, { ...options, verify: true }), unchanged: false };
+      try {
+        const settled = await this.#settle(record, receipt, { ...options, verify: true });
+        return { kind: 'record', record: settled, unchanged: settled.revision === record.revision };
+      } catch (error) {
+        if (!(error instanceof HubError && error.code === 'journal-conflict')) throw error;
+        // Another hub advanced this record. Converge on its result; never fight over the journal.
+        const current = await this.journal.get(id);
+        if (current && terminal(current.status)) { this.#settleLocal(id); return { kind: 'record', record: current, unchanged: true }; }
+        return rejected('journal-conflict', 'Another writer advanced this record; reconcile again');
+      }
     } finally { this.#executing.delete(id); }
   }
 }

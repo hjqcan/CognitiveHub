@@ -17,8 +17,8 @@ export async function fixture(options = {}) {
     ...options.capability,
   };
   const plugins = new PluginHost();
-  plugins.install({ manifest: { apiVersion: 1, id: 'robot', version: '1.0.0' },
-    setup: ctx => { ctx.capability(capability); ctx.onDispose(() => { control.disposed = true; }); } }, ['tenant-a', 'R01']);
+  plugins.install({ manifest: { apiVersion: 1, id: 'robot', version: options.pluginVersion ?? '1.0.0' },
+    setup: ctx => { ctx.capability(capability); ctx.onDispose(() => { control.disposed = true; }); } }, options.scope ?? ['tenant-a', 'R01']);
   await plugins.start();
   const inbox = new HumanInbox(), events = new MemoryEvents(), journal = options.journal ?? new MemoryJournal();
   const hub = new CognitiveHub({ plugins, state: { observe: async () => ({ version: control.version,

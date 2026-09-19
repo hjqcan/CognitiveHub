@@ -32,9 +32,11 @@ export interface CandidateDraft {
   readonly resources: readonly string[];
 }
 export interface BoundAction extends CandidateDraft {
+  /** Identity of what would be done: plugin, capability and candidate key. Excludes the activation. */
   readonly id: string;
   readonly pluginId: string;
   readonly pluginVersion: string;
+  /** Process-local lease generation binding a proposal to one activation. Not part of action identity; meaningless in persisted records. */
   readonly activation: number;
   readonly capability: string;
   readonly effect: 'read' | 'write' | 'physical';
@@ -78,7 +80,10 @@ export interface Capability {
    * nothing reliable was recorded. Return pending unless the evidence is conclusive.
    */
   verify(context: ExecutionContext, receipt: Receipt): Promise<Verification>;
-  /** Optional: recover a lost receipt (e.g. by idempotency key) without resubmitting. verify still confirms it. */
+  /**
+   * Optional: recover a lost receipt (e.g. by idempotency key) without resubmitting. verify still confirms it.
+   * The receipt is null when the process died between the journal claim and receipt persistence.
+   */
   reconcile?(context: ExecutionContext, receipt: Receipt | null): Promise<Receipt>;
 }
 export interface DecisionRequest {
@@ -133,6 +138,8 @@ export interface ExecutionRecord {
   readonly status: ExecutionStatus;
   readonly receipt: Receipt | null;
   readonly evidence: Json;
+  readonly createdAt: number;
+  readonly updatedAt: number;
 }
 export type Claim =
   | { readonly kind: 'claimed' }
@@ -142,14 +149,17 @@ export interface ExecutionJournal {
   /** Atomically reserve operation ID AND exclusive tenant resources. */
   claim(record: ExecutionRecord): Promise<Claim>;
   get(id: string): Promise<ExecutionRecord | undefined>;
-  /** Compare-and-swap. Terminal records release their resource reservations. */
+  /** Compare-and-swap; MUST throw HubError('journal-conflict') on a revision mismatch. Terminal records release their reservations. */
   replace(record: ExecutionRecord, expectedRevision: number): Promise<void>;
+  /** Non-terminal records, so a fresh process can reconcile what an earlier one left open. */
+  unsettled(): Promise<readonly ExecutionRecord[]>;
 }
 export type ExecutionResult =
   /** unchanged: this call wrote nothing, because the operation was already recorded or nothing new was learned. */
   | { readonly kind: 'record'; readonly record: ExecutionRecord; readonly unchanged: boolean }
   | { readonly kind: 'dry-run'; readonly action: BoundAction }
-  | { readonly kind: 'rejected'; readonly reason: string };
+  /** code is stable and machine-readable; reason is for humans and may change. */
+  | { readonly kind: 'rejected'; readonly code: string; readonly reason: string };
 export interface HubEvent {
   readonly type: string;
   readonly at: number;

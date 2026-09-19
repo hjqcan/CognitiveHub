@@ -1,4 +1,4 @@
-import type { Json, Scope } from './contracts.js';
+import type { BoundAction, ExecutionRecord, Json, Receipt, Scope } from './contracts.js';
 
 export class HubError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = 'HubError'; }
@@ -46,6 +46,49 @@ export function canonical(value: unknown): string {
   return JSON.stringify(sort(value));
 }
 export const newId = (): string => crypto.randomUUID();
+
+type JsonObject = { readonly [key: string]: Json };
+const jsonObject = (value: Json | undefined, code: string, name: string): JsonObject => {
+  ensure(value !== null && typeof value === 'object' && !Array.isArray(value), code, `${name} must be a JSON object`);
+  return value as JsonObject;
+};
+/** What a bound action would do. Excludes the process-local activation and the model-facing description. */
+export function actionIdentity(action: BoundAction): Json {
+  return { pluginId: action.pluginId, pluginVersion: action.pluginVersion, capability: action.capability, key: action.key,
+    input: action.input, resources: action.resources, effect: action.effect, scope: action.scope };
+}
+export function assertReceipt(value: unknown): asserts value is Receipt {
+  assertJson(value);
+  const receipt = jsonObject(value, 'invalid-receipt', 'Receipt');
+  const status = receipt.status;
+  ensure(status === 'accepted' || status === 'completed' || status === 'failed' || status === 'unknown',
+    'invalid-receipt', 'Unknown receipt status');
+  if (status === 'accepted') identifier(receipt.handle as string, 'task handle');
+  if (status === 'failed' || status === 'unknown') identifier(receipt.reason as string, 'receipt reason');
+  if (status !== 'unknown') ensure(Object.hasOwn(receipt, 'evidence'), 'invalid-receipt', 'Receipt evidence is required');
+}
+const STATUSES: readonly string[] = ['submitted', 'pending', 'unknown', 'verified', 'failed'];
+/** Shape check for records loaded from a journal. Fails closed: the hub only adopts what it can validate. */
+export function assertRecord(value: unknown): asserts value is ExecutionRecord {
+  assertJson(value);
+  const record = jsonObject(value, 'invalid-record', 'Execution record');
+  identifier(record.id as string, 'record id');
+  identifier(record.operationId as string, 'operation id');
+  identifier(record.fingerprint as string, 'fingerprint');
+  ensure(typeof record.status === 'string' && STATUSES.includes(record.status), 'invalid-record', 'Unknown execution status');
+  ensure(Number.isInteger(record.revision) && (record.revision as number) >= 0, 'invalid-record', 'Revision must be a non-negative integer');
+  ensure(Number.isFinite(record.createdAt) && Number.isFinite(record.updatedAt), 'invalid-record', 'Record timestamps must be finite');
+  ensure(Object.hasOwn(record, 'receipt') && Object.hasOwn(record, 'evidence'), 'invalid-record', 'Record receipt and evidence are required');
+  const intent = jsonObject(record.intent, 'invalid-record', 'Record intent');
+  identifier(intent.id as string, 'intent id');
+  validScope(intent.scope as Scope);
+  identifier(jsonObject(record.observation, 'invalid-record', 'Record observation').version as string, 'state version');
+  const action = jsonObject(record.action, 'invalid-record', 'Record action');
+  for (const key of ['pluginId', 'pluginVersion', 'capability', 'key'] as const) identifier(action[key] as string, `action ${key}`);
+  ensure(Array.isArray(action.resources), 'invalid-record', 'Action resources must be an array');
+  for (const resource of action.resources) identifier(resource as string, 'resource id');
+  if (record.receipt !== null) assertReceipt(record.receipt);
+}
 
 /** Deadline bounds waiting, not external side effects. Late results are never executed. */
 export async function bounded<T>(

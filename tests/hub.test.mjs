@@ -337,3 +337,39 @@ test('a receipt lost to journal failure is reconciled as unknown and confirmed b
   assert.equal((await f.hub.reconcile(r.record.id)).unchanged, true);
   await f.plugins.stop('robot');
 });
+
+test('operation retries after plugin reactivation return the existing record', async () => {
+  const f = await fixture(), p = await f.hub.propose(intent());
+  const first = await f.hub.execute(p.id, 'op', { live: true });
+  await f.plugins.stop('robot'); await f.plugins.start();
+  const again = await f.hub.propose(intent());
+  assert.notEqual(again.action.activation, p.action.activation); assert.equal(again.action.id, p.action.id);
+  const retry = await f.hub.execute(again.id, 'op', { live: true });
+  assert.equal(retry.unchanged, true); assert.equal(retry.record.id, first.record.id); assert.equal(f.control.calls, 1);
+});
+
+test('rejections carry machine-readable codes', async () => {
+  const f = await fixture();
+  assert.equal((await f.hub.execute('nope', 'op', { live: true })).code, 'unknown-proposal');
+  const expired = await f.hub.propose(intent()); f.control.now += 4000;
+  assert.equal((await f.hub.execute(expired.id, 'op', { live: true })).code, 'stale-proposal');
+  const denied = await f.hub.propose(intent()); f.control.allow = false;
+  assert.equal((await f.hub.execute(denied.id, 'op', { live: true })).code, 'policy-rejected');
+  assert.equal((await f.hub.reconcile('missing')).code, 'unknown-operation');
+  const g = await fixture({ capability: { execute: async () => ({ status: 'accepted', handle: 'H1', evidence: null }) } });
+  const held = await g.hub.propose(intent()); await g.hub.execute(held.id, 'held', { live: true });
+  assert.equal((await g.hub.execute(held.id, 'held-2', { live: true })).code, 'proposal-consumed');
+  const other = await g.hub.propose(intent({ id: 'other-task' }));
+  assert.equal((await g.hub.execute(other.id, 'other-op', { live: true })).code, 'claim-conflict');
+});
+
+test('reconciliation does not write unchanged revisions', async () => {
+  const f = await fixture({ capability: { execute: async () => ({ status: 'accepted', handle: 'H1', evidence: null }),
+    verify: async () => ({ status: 'pending', evidence: { taskState: 'running' } }) } });
+  const p = await f.hub.propose(intent()), first = await f.hub.execute(p.id, 'op', { live: true });
+  const once = await f.hub.reconcile(first.record.id);
+  assert.equal(once.unchanged, false); assert.equal(once.record.revision, first.record.revision + 1);
+  const twice = await f.hub.reconcile(first.record.id);
+  assert.equal(twice.unchanged, true); assert.equal(twice.record.revision, once.record.revision);
+  assert.equal(f.events.entries().filter(e => e.type === 'execution.updated').length, 2);
+});

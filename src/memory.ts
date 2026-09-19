@@ -1,17 +1,35 @@
 import type {
   Claim, DeliberationProvider, DeliberationRequest, EventSink, ExecutionJournal, ExecutionRecord, HubEvent,
 } from './contracts.js';
-import { canonical, ensure, immutable } from './primitives.js';
+import { assertRecord, canonical, ensure, immutable } from './primitives.js';
 
 export const terminal = (status: ExecutionRecord['status']): boolean => status === 'verified' || status === 'failed';
-/** Single-process reference adapter. No persistence, cross-process lock, or exactly-once guarantee. */
+/**
+ * Single-process reference adapter. No cross-process lock or exactly-once guarantee.
+ * entries() exports plain JSON; the constructor rebuilds a journal from it, so a host can persist it however it likes.
+ */
 export class MemoryJournal implements ExecutionJournal {
   readonly #records = new Map<string, ExecutionRecord>();
   readonly #locks = new Map<string, string>();
+  /** Terminal records are idempotency history and must be imported too; unsettled ones reclaim their resources. */
+  constructor(records: readonly ExecutionRecord[] = []) {
+    for (const input of records) {
+      assertRecord(input);
+      ensure(!this.#records.has(input.id), 'invalid-record', `Duplicate record ${input.id}`);
+      const record = immutable(input);
+      this.#records.set(record.id, record);
+      if (terminal(record.status)) continue;
+      for (const key of this.#resources(record)) {
+        ensure(!this.#locks.has(key), 'journal-conflict', 'Two unsettled records reserve the same resource');
+        this.#locks.set(key, record.id);
+      }
+    }
+  }
   #resources(record: ExecutionRecord): string[] {
     return record.action.resources.map(r => canonical([record.intent.scope[0]!, r]));
   }
   async get(id: string): Promise<ExecutionRecord | undefined> { return this.#records.get(id); }
+  async unsettled(): Promise<readonly ExecutionRecord[]> { return [...this.#records.values()].filter(r => !terminal(r.status)); }
   async claim(record: ExecutionRecord): Promise<Claim> {
     const existing = this.#records.get(record.id);
     if (existing) return existing.fingerprint === record.fingerprint

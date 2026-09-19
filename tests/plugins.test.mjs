@@ -192,3 +192,17 @@ test('inactive plugins can be uninstalled; a failed module no longer blocks the 
   assert.equal(host.status('flaky'), 'active'); assert.equal(boots, 2);
   await host.stop('flaky'); host.uninstall('flaky'); await host.stop('healthy');
 });
+
+test('rebind leases the active activation of an exact plugin version', async () => {
+  const f = await fixture(), scope = intent().scope, id = f.capability.id;
+  await f.plugins.stop('robot'); await f.plugins.start();
+  const lease = f.plugins.rebind('robot', '1.0.0', id, scope);
+  assert.equal(lease.registration.activation, 2);
+  assert.throws(() => f.plugins.rebind('robot', '2.0.0', id, scope), { code: 'plugin-version-mismatch' });
+  assert.throws(() => f.plugins.rebind('robot', '1.0.0', id, ['tenant-b', 'R01']), { code: 'unavailable-capability' });
+  assert.throws(() => f.plugins.rebind('missing', '1.0.0', id, scope), { code: 'unavailable-capability' });
+  let stopped = false; const stop = f.plugins.stop('robot').then(() => { stopped = true; });
+  await tick(); assert.equal(stopped, false);
+  assert.throws(() => f.plugins.rebind('robot', '1.0.0', id, scope), { code: 'unavailable-capability' });
+  lease.release(); await stop; assert.equal(stopped, true);
+});
