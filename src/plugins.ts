@@ -1,0 +1,177 @@
+import type {
+  Capability, CapabilityRegistration, Dispose, Plugin, PluginContext, Scope,
+} from './contracts.js';
+import { ensure, identifier, immutable, validScope, visible } from './primitives.js';
+
+type Status = 'installed' | 'starting' | 'active' | 'draining' | 'stopped' | 'failed';
+interface Mount {
+  plugin: Plugin;
+  scope: Scope;
+  status: Status;
+  activation: number;
+  leases: number;
+  disposers: Dispose[];
+  drained?: () => void;
+}
+export interface CapabilityLease {
+  readonly registration: CapabilityRegistration;
+  release(): void;
+}
+/** Trusted, explicit module mounting. NOT a sandbox or a remote package installer. */
+export class PluginHost {
+  readonly #mounts = new Map<string, Mount>();
+  readonly #services = new Map<string, { owner: string; value: unknown }>();
+  readonly #capabilities: CapabilityRegistration[] = [];
+  #starting = false;
+
+  install(plugin: Plugin, scope: Scope = []): void {
+    ensure(!this.#starting, 'host-busy', 'Cannot install during activation');
+    const manifest = immutable(plugin.manifest);
+    identifier(manifest.id, 'plugin id'); identifier(manifest.version, 'plugin version');
+    ensure(manifest.apiVersion === 1, 'plugin-api', 'Unsupported plugin API version');
+    ensure(!this.#mounts.has(manifest.id), 'duplicate-plugin', `Plugin ${manifest.id} is already installed`);
+    validScope(scope, true);
+    [...manifest.requires ?? [], ...manifest.provides ?? []].forEach(x => identifier(x, 'service id'));
+    ensure(new Set(manifest.provides).size === (manifest.provides?.length ?? 0), 'duplicate-service', 'Duplicate provides');
+    this.#mounts.set(manifest.id, {
+      plugin: { manifest, setup: ctx => plugin.setup(ctx) }, scope: immutable(scope),
+      status: 'installed', activation: 0, leases: 0, disposers: [],
+    });
+  }
+
+  /** Activate a batch in service dependency order; roll back this batch on failure. */
+  async start(): Promise<void> {
+    ensure(!this.#starting, 'host-busy', 'Activation already running');
+    this.#starting = true;
+    const started: Mount[] = [];
+    try {
+      let pending = [...this.#mounts.values()].filter(m => m.status === 'installed' || m.status === 'stopped');
+      while (pending.length) {
+        const ready = pending.find(m => (m.plugin.manifest.requires ?? []).every(key => this.#services.has(key)));
+        ensure(ready, 'missing-dependency', 'Unresolved or cyclic plugin service dependencies');
+        await this.#activate(ready);
+        started.push(ready);
+        pending = pending.filter(m => m !== ready);
+      }
+    } catch (error) {
+      const errors: unknown[] = [error];
+      for (const mount of started.reverse()) {
+        mount.status = 'stopped';
+        try { await this.#dispose(mount); } catch (e) { errors.push(e); }
+      }
+      if (errors.length > 1) throw new AggregateError(errors, 'Plugin batch activation and rollback failed');
+      throw error;
+    } finally { this.#starting = false; }
+  }
+
+  async #activate(mount: Mount): Promise<void> {
+    mount.status = 'starting'; mount.activation++;
+    const { manifest } = mount.plugin;
+    let open = true;
+    const registering = (): void => ensure(open, 'closed-context', 'Contributions must be registered during setup');
+    const ctx: PluginContext = {
+      scope: mount.scope,
+      service: <T>(key: string): T => {
+        ensure([...(manifest.requires ?? []), ...(manifest.provides ?? [])].includes(key),
+          'undeclared-service', `Declare dependency ${key}`);
+        ensure(this.#services.has(key), 'missing-service', `Service ${key} is unavailable`);
+        return this.#services.get(key)!.value as T;
+      },
+      provide: (key, value) => {
+        registering();
+        ensure(manifest.provides?.includes(key), 'undeclared-service', `Service ${key} was not declared`);
+        ensure(!this.#services.has(key), 'duplicate-service', `Service ${key} already exists`);
+        this.#services.set(key, { owner: manifest.id, value });
+        mount.disposers.push(() => { this.#services.delete(key); });
+      },
+      capability: capability => {
+        registering(); this.#registerCapability(mount, capability);
+      },
+      onDispose: dispose => { registering(); mount.disposers.push(dispose); },
+    };
+    try {
+      const dispose = await mount.plugin.setup(ctx);
+      if (dispose) mount.disposers.push(dispose);
+      for (const key of manifest.provides ?? [])
+        ensure(this.#services.get(key)?.owner === manifest.id, 'missing-service', `Plugin did not provide ${key}`);
+      mount.status = 'active';
+    } catch (error) {
+      mount.status = 'failed';
+      try { await this.#dispose(mount); }
+      catch (cleanup) { throw new AggregateError([error, cleanup], 'Activation and cleanup failed'); }
+      throw error;
+    } finally { open = false; }
+  }
+
+  #registerCapability(mount: Mount, capability: Capability): void {
+    identifier(capability.id, 'capability id'); identifier(capability.description, 'capability description');
+    ensure(['read', 'write', 'physical'].includes(capability.effect), 'invalid-capability', 'Unknown effect type');
+    for (const method of ['prepare', 'validate', 'check', 'execute', 'verify'] as const)
+      ensure(typeof capability[method] === 'function', 'invalid-capability', `Missing ${method}`);
+    const pluginId = mount.plugin.manifest.id;
+    ensure(!this.#capabilities.some(r => r.pluginId === pluginId && r.capability.id === capability.id),
+      'duplicate-capability', `Duplicate capability ${capability.id}`);
+    // Freeze metadata and bind methods so caller mutations cannot change this activation.
+    const copy: Capability = Object.freeze({
+      id: capability.id, description: capability.description, effect: capability.effect,
+      prepare: capability.prepare.bind(capability), validate: capability.validate.bind(capability),
+      check: capability.check.bind(capability), execute: capability.execute.bind(capability),
+      verify: capability.verify.bind(capability),
+      ...(capability.reconcile ? { reconcile: capability.reconcile.bind(capability) } : {}),
+    });
+    const registration = Object.freeze({ pluginId, pluginVersion: mount.plugin.manifest.version,
+      activation: mount.activation, scope: mount.scope, capability: copy });
+    this.#capabilities.push(registration);
+    mount.disposers.push(() => {
+      const index = this.#capabilities.indexOf(registration);
+      if (index >= 0) this.#capabilities.splice(index, 1);
+    });
+  }
+
+  resolve<T>(key: string): T {
+    const service = this.#services.get(key);
+    ensure(service && this.#mounts.get(service.owner)?.status === 'active', 'missing-service', `No active service ${key}`);
+    return service.value as T;
+  }
+  list(scope: Scope): readonly CapabilityRegistration[] {
+    validScope(scope);
+    return this.#capabilities.filter(r => this.#mounts.get(r.pluginId)?.status === 'active' && visible(r.scope, scope));
+  }
+  acquire(pluginId: string, capabilityId: string, activation: number, scope: Scope): CapabilityLease {
+    const mount = this.#mounts.get(pluginId);
+    const registration = this.list(scope).find(r => r.pluginId === pluginId &&
+      r.capability.id === capabilityId && r.activation === activation);
+    ensure(mount && registration, 'unavailable-capability', 'Capability was removed, replaced, or is outside scope');
+    mount.leases++;
+    let released = false;
+    return { registration, release: () => {
+      if (released) return;
+      released = true; mount.leases--;
+      if (mount.leases === 0) mount.drained?.();
+    } };
+  }
+  status(id: string): Status | undefined { return this.#mounts.get(id)?.status; }
+
+  /** Hide new capabilities first, then drain existing leases. No implicit action cancellation. */
+  async stop(id: string): Promise<void> {
+    ensure(!this.#starting, 'host-busy', 'Cannot stop during activation');
+    const mount = this.#mounts.get(id);
+    ensure(mount?.status === 'active', 'plugin-state', 'Only active plugins can be stopped');
+    const provided = new Set(mount.plugin.manifest.provides ?? []);
+    const dependent = [...this.#mounts.values()].find(m => m !== mount &&
+      ['active', 'draining', 'starting'].includes(m.status) &&
+      (m.plugin.manifest.requires ?? []).some(key => provided.has(key)));
+    ensure(!dependent, 'active-dependent', `Stop dependent ${dependent?.plugin.manifest.id ?? ''} first`);
+    mount.status = 'draining';
+    if (mount.leases > 0) await new Promise<void>(resolve => { mount.drained = resolve; });
+    mount.status = 'stopped';
+    try { await this.#dispose(mount); } catch (e) { mount.status = 'failed'; throw e; }
+  }
+  async #dispose(mount: Mount): Promise<void> {
+    const errors: unknown[] = [];
+    for (const dispose of mount.disposers.splice(0).reverse()) {
+      try { await dispose(); } catch (error) { errors.push(error); }
+    }
+    if (errors.length) throw new AggregateError(errors, 'Plugin cleanup failed');
+  }
+}

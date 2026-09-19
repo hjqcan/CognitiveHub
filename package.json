@@ -1,0 +1,20 @@
+{
+  "name": "@cognitive-hub/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Embeddable, plugin-first cognitive middleware between deliberation and execution.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./jev": { "types": "./dist/jev.d.ts", "import": "./dist/jev.js" }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "demo": "npm run build && node examples/robot-platform.mjs",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": { "typescript": "5.8.3" }
+}
