@@ -47,7 +47,7 @@ setup 结束后贡献窗口关闭。不要保留 ctx 在后台异步注册能力
 | `check` | 执行前重查确定性前置条件，无副作用 |
 | `execute` | 通过宿主提交动作，传递 idempotencyKey/预期版本 |
 | `verify` | 查询独立效果证据，不能只把 HTTP 200 当作 verified |
-| `reconcile` | 可选；按幂等键或句柄找回丢失的回执，不重新执行命令。结果仍交给 verify 确认 |
+| `reconcile` | 可选；按幂等键或句柄找回丢失的回执，不重新执行命令。结果仍交给 verify 确认。receipt 为 null 表示进程在 claim 与回执落盘之间死亡 |
 
 候选 `key` 在一个能力的一次 prepare 结果中唯一。input 必须是普通 JSON；resources 是宿主定义的规范资源 ID。写能力必须占用资源。坐标系、单位、精度、取消和完成语义应写进实际领域契约，不要仅靠“统一参数名”。
 
@@ -62,13 +62,15 @@ setup 结束后贡献窗口关闭。不要保留 ctx 在后台异步注册能力
 
 初次收到 accepted 时保持 pending。后续 `Hub.reconcile()` 会先调用可选的能力 reconcile 找回回执，再对任何未终结的结果调用 verify：accepted 的 handle、completed，以及 unknown；回执从未记录成功的 submitted 记录会以 unknown 回执交给 verify。verify 必须依据独立证据判断：确认 verified/failed 才进入终态，证据不足返回 pending，此时 unknown 仍保持 unknown 并继续占用资源。因此写能力不实现 reconcile 也能从未知结果恢复，前提是 verify 真正查询效果，而不是只看回执。
 
+记录由已经不存在的进程留下时，`Hub.reconcile()` 会按插件 ID、精确插件版本和能力 ID 在当前 PluginHost 重新绑定，然后走同样的查询与核验；找不到兼容实现返回 `unavailable-capability` 或 `plugin-version-mismatch`，记录原样保留，等宿主安装正确版本后再试。此时 verify/reconcile 收到的 observation 是旧进程记录的快照，不是当前状态：只用其中的标识符（版本号、任务句柄），不把它当作现实。查询应完全依赖 `idempotencyKey` 或回执句柄，不依赖进程内状态。
+
 无法判断是否有副作用时返回 unknown，不要返回 failed。execute 抛错/超时/返回非法结构也按 unknown 处理。验证码、自由文本、运动规划等缺失内容应由慢思考或相应能力提供，不让 Jev 编造。
 
 当前没有取消/补偿端口。中断网络等待不等于取消远端任务。要加入取消能力，应通过新的已授权任务/契约显式实现，不能塞进 dispose。
 
 ## 排空与版本更新
 
-`stop(pluginId)` 先让能力不可见，再等待既有 lease。pending/unknown 期间它可能持续等待，这是保护，不是强行杀掉任务的超时。操作进入终态后，尚未实际结束的 execute/verify/reconcile 回调仍持有插件租约；超时和 AbortSignal 不代表这些回调已退出。
+`stop(pluginId)` 先让能力不可见，再等待既有 lease。pending/unknown 期间它可能持续等待，这是保护，不是强行杀掉任务的超时。操作进入终态后，尚未实际结束的 execute/verify/reconcile 回调仍持有插件租约；超时和 AbortSignal 不代表这些回调已退出。恢复时采纳的旧记录同样持有租约，直到它进入终态且回调退出；绑定失败则不取租约。
 
 插件在异步 dispose 完成前持续处于 draining，其依赖提供者不能停止，也不能重新激活该插件。清理成功后才变为 stopped；清理失败进入 failed。`start()` 不会重试 failed 模块；用 `uninstall(pluginId)` 移除 installed/stopped/failed 的挂载后重新 install，才是显式的重试或替换路径。active/draining 的模块不能卸载。
 
