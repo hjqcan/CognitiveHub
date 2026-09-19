@@ -1,13 +1,14 @@
 import type {
   BoundAction, Decision, DecisionProvider, DecisionRequest, DeliberationProvider,
   EventSink, ExecutionContext, ExecutionJournal, ExecutionRecord, ExecutionResult,
-  Intent, Json, Observation, Policy, ProposalResult, Receipt, StateProvider, Verification,
+  Guidance, Intent, Json, Observation, Policy, ProposalResult, Receipt, StateProvider, Verification,
 } from './contracts.js';
 import type { CapabilityLease } from './plugins.js';
 import { PluginHost } from './plugins.js';
 import { MemoryJournal, terminal } from './memory.js';
 import {
-  actionIdentity, assertJson, assertReceipt, assertRecord, bounded, canonical, ensure, HubError, identifier, immutable, newId, validScope,
+  actionIdentity, assertGuidance, assertJson, assertReceipt, assertRecord, bounded, canonical, ensure, executionId, HubError, identifier,
+  immutable, newId, validScope,
 } from './primitives.js';
 
 interface Proposal {
@@ -107,8 +108,10 @@ export class CognitiveHub {
     return { kind: 'deliberation', request };
   }
 
-  async propose(input: Intent, options: { signal?: AbortSignal } = {}): Promise<ProposalResult> {
+  async propose(input: Intent, options: { signal?: AbortSignal; guidance?: Guidance } = {}): Promise<ProposalResult> {
     const intent = this.#intent(input);
+    const guidance = options.guidance;
+    if (guidance !== undefined) assertGuidance(guidance);
     const session = canonical([intent.scope, intent.id]);
     if (this.#planning.has(session)) return { kind: 'wait', reason: 'A decision is already in flight for this intent' };
     this.#planning.add(session);
@@ -163,7 +166,7 @@ export class CognitiveHub {
             candidates.push(action); policyVersions.set(action.id, policy.version);
           }
           if (!candidates.length) return { kind: 'deliberate' as const, reason: 'No authorized, applicable capability candidates' };
-          const request: DecisionRequest = immutable({ intent, observation, candidates });
+          const request: DecisionRequest = immutable({ intent, observation, candidates, ...(guidance ? { guidance } : {}) });
           const decision = immutable(await this.#options.decision.decide(request, signal));
           assertJson(decision); signal.throwIfAborted();
           ensure(observation.validUntil > this.#now(), 'stale-state', 'State expired while deciding');
@@ -180,7 +183,7 @@ export class CognitiveHub {
           ensure(this.#proposals.size < this.#maxProposals, 'proposal-limit', 'Consume/discard outstanding proposals before creating more');
           this.#proposals.set(proposal.id, proposal);
           this.#emit('proposal.created', { proposalId: proposal.id, intentId: intent.id, capability: action.capability });
-          return { kind: 'proposal' as const, id: proposal.id, action, expiresAt: proposal.expiresAt, decision };
+          return { kind: 'proposal' as const, id: proposal.id, action, expiresAt: proposal.expiresAt, decision, stateVersion: observation.version };
         } finally { leases.reverse().forEach(l => l.release()); this.#planning.delete(session); }
       }).then(result => {
         if (result.kind !== 'deliberate') return result;
@@ -204,7 +207,7 @@ export class CognitiveHub {
     const proposal = this.#proposals.get(proposalId);
     if (!proposal) return rejected('unknown-proposal', 'Unknown or discarded proposal');
     const { intent, action } = proposal;
-    const id = canonical([intent.scope, intent.id, operationId]);
+    const id = executionId(intent, operationId);
     // Identity excludes the process-local activation, so a retry after a restart finds its own record.
     const fingerprint = canonical({ intent, action: actionIdentity(action) });
     if (this.#executingProposals.has(proposalId)) return rejected('busy', 'Proposal is already being handled');

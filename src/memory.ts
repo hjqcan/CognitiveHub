@@ -1,7 +1,9 @@
 import type {
   Claim, DeliberationProvider, DeliberationRequest, EventSink, ExecutionJournal, ExecutionRecord, HubEvent,
 } from './contracts.js';
-import { assertRecord, canonical, ensure, immutable } from './primitives.js';
+import type { Run, RunStore } from './run.js';
+import { runTerminal } from './run.js';
+import { assertJson, assertRecord, canonical, ensure, identifier, immutable } from './primitives.js';
 
 export const terminal = (status: ExecutionRecord['status']): boolean => status === 'verified' || status === 'failed';
 /**
@@ -62,6 +64,43 @@ export class HumanInbox implements DeliberationProvider {
   pending(): readonly DeliberationRequest[] { return [...this.#requests.values()]; }
   /** Acknowledge delivery/handling, NOT approval to execute an old proposal. */
   acknowledge(id: string): boolean { return this.#requests.delete(id); }
+}
+/** Single-process run store. entries()/events() export plain JSON; the constructor rebuilds from it. */
+export class MemoryRunStore implements RunStore {
+  readonly #runs = new Map<string, Run>();
+  readonly #events = new Set<string>();
+  constructor(runs: readonly Run[] = [], events: readonly string[] = []) {
+    for (const input of runs) {
+      assertJson(input); identifier(input.id, 'run id');
+      ensure(!this.#runs.has(input.id), 'invalid-run', `Duplicate run ${input.id}`);
+      this.#runs.set(input.id, immutable(input));
+    }
+    for (const key of events) { identifier(key, 'event key'); this.#events.add(key); }
+  }
+  async create(run: Run): Promise<void> {
+    ensure(!this.#runs.has(run.id), 'run-exists', `Run ${run.id} already exists`);
+    ensure(run.revision === 0, 'invalid-run', 'A new run starts at revision 0');
+    const key = canonical([run.intent.scope, run.intent.id]);
+    ensure(![...this.#runs.values()].some(r => !runTerminal(r.status) && canonical([r.intent.scope, r.intent.id]) === key),
+      'run-exists', 'An unsettled run already exists for this intent');
+    this.#runs.set(run.id, immutable(run));
+  }
+  async get(id: string): Promise<Run | undefined> { return this.#runs.get(id); }
+  async replace(run: Run, expectedRevision: number): Promise<void> {
+    const current = this.#runs.get(run.id);
+    ensure(current && current.revision === expectedRevision && run.revision === expectedRevision + 1, 'run-conflict', 'Run version conflict');
+    ensure(!runTerminal(current.status), 'run-terminal', 'A finished run cannot be changed');
+    this.#runs.set(run.id, immutable(run));
+  }
+  async markEvent(runId: string, key: string): Promise<boolean> {
+    const seen = canonical([runId, key]);
+    if (this.#events.has(seen)) return false;
+    this.#events.add(seen);
+    return true;
+  }
+  async unsettled(): Promise<readonly Run[]> { return [...this.#runs.values()].filter(r => !runTerminal(r.status)); }
+  entries(): readonly Run[] { return [...this.#runs.values()]; }
+  events(): readonly string[] { return [...this.#events]; }
 }
 export class MemoryEvents implements EventSink {
   readonly #events: HubEvent[] = [];

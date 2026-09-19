@@ -65,3 +65,11 @@ test('Jev can be installed as a service plugin', async () => {
   await host.start(); assert.equal(host.resolve('decision.v1').name, 'jev-fixture');
   await host.stop('cognitive.jev'); assert.throws(() => host.resolve('decision.v1'));
 });
+
+test('Jev receives guidance criteria as state, not as an instruction override', async () => {
+  let sent;
+  const p = provider(response(), { fetch: async (_url, init) => { sent = JSON.parse(init.body); return Response.json(response()); } });
+  await p.decide({ ...request, guidance: { version: 2, criteria: ['Prefer safe routes'], escalate: ['Any alarm'], author: 'ops', createdAt: 1 } }, signal());
+  assert.deepEqual(sent.state.guidance, { criteria: ['Prefer safe routes'], escalate: ['Any alarm'] });
+  assert.doesNotMatch(sent.questions.next.instructions, /Prefer safe routes/);
+});

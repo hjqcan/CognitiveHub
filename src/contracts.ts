@@ -86,10 +86,21 @@ export interface Capability {
    */
   reconcile?(context: ExecutionContext, receipt: Receipt | null): Promise<Receipt>;
 }
+/** Versioned judgment criteria supplied by a human or slow thinker. Data for the decider; never authorization. */
+export interface Guidance {
+  readonly version: number;
+  readonly criteria: readonly string[];
+  /** Conditions under which the decider should ask rather than act. */
+  readonly escalate: readonly string[];
+  readonly author: string;
+  readonly createdAt: number;
+}
 export interface DecisionRequest {
   readonly intent: Intent;
   readonly observation: Observation;
   readonly candidates: readonly BoundAction[];
+  /** Present when the host or the managed runtime supplies judgment criteria. Cannot widen what Policy allows. */
+  readonly guidance?: Guidance;
 }
 export type Decision =
   | { readonly kind: 'action'; readonly candidateId: string; readonly metadata?: Json }
@@ -116,6 +127,10 @@ export interface DeliberationRequest {
   readonly stateVersion: string | null;
   readonly reason: string;
   readonly createdAt: number;
+  /** Set by the managed runtime: which run is blocked, why, and what a response must reference. */
+  readonly runId?: string;
+  readonly kind?: string;
+  readonly subject?: Json;
 }
 export interface DeliberationProvider {
   /** The host authenticates responses and reproposes against fresh state. */
@@ -123,7 +138,7 @@ export interface DeliberationProvider {
 }
 export type ProposalResult =
   | { readonly kind: 'proposal'; readonly id: string; readonly action: BoundAction;
-      readonly expiresAt: number; readonly decision: Decision }
+      readonly expiresAt: number; readonly decision: Decision; readonly stateVersion: string }
   | { readonly kind: 'wait'; readonly reason: string }
   | { readonly kind: 'deliberation'; readonly request: DeliberationRequest };
 export type ExecutionStatus = 'submitted' | 'pending' | 'unknown' | 'verified' | 'failed';

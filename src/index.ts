@@ -1,7 +1,11 @@
 export type * from './contracts.js';
+export type * from './run.js';
+export { runTerminal } from './run.js';
 export { CognitiveHub } from './hub.js';
 export type { HubOptions } from './hub.js';
+export { IntentRuntime } from './runtime.js';
+export type { RuntimeOptions } from './runtime.js';
 export { PluginHost } from './plugins.js';
 export type { CapabilityLease } from './plugins.js';
-export { MemoryJournal, MemoryEvents, HumanInbox } from './memory.js';
+export { MemoryJournal, MemoryRunStore, MemoryEvents, HumanInbox } from './memory.js';
 export { HubError, assertRecord } from './primitives.js';

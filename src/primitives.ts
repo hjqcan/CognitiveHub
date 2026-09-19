@@ -1,4 +1,4 @@
-import type { BoundAction, ExecutionRecord, Json, Receipt, Scope } from './contracts.js';
+import type { BoundAction, ExecutionRecord, Guidance, Intent, Json, Receipt, Scope } from './contracts.js';
 
 export class HubError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = 'HubError'; }
@@ -88,6 +88,20 @@ export function assertRecord(value: unknown): asserts value is ExecutionRecord {
   ensure(Array.isArray(action.resources), 'invalid-record', 'Action resources must be an array');
   for (const resource of action.resources) identifier(resource as string, 'resource id');
   if (record.receipt !== null) assertReceipt(record.receipt);
+}
+/** Journal record id of one logical operation of an intent. Shared by the hub and the managed runtime. */
+export const executionId = (intent: Intent, operationId: string): string => canonical([intent.scope, intent.id, operationId]);
+/** What an approval refers to: the capability, its bound input and the resources it takes. */
+export const actionDigest = (action: BoundAction): string => canonical([action.capability, action.input, action.resources]);
+export function assertGuidance(value: unknown): asserts value is Guidance {
+  assertJson(value);
+  const guidance = jsonObject(value, 'invalid-guidance', 'Guidance');
+  ensure(Number.isInteger(guidance.version) && (guidance.version as number) >= 1, 'invalid-guidance', 'Guidance version must be a positive integer');
+  for (const key of ['criteria', 'escalate'] as const)
+    ensure(Array.isArray(guidance[key]) && (guidance[key] as readonly Json[]).every(x => typeof x === 'string'),
+      'invalid-guidance', `Guidance ${key} must be an array of strings`);
+  identifier(guidance.author as string, 'guidance author');
+  ensure(Number.isFinite(guidance.createdAt), 'invalid-guidance', 'Guidance createdAt must be finite');
 }
 
 /** Deadline bounds waiting, not external side effects. Late results are never executed. */

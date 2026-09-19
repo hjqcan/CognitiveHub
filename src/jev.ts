@@ -58,6 +58,8 @@ export class JevDecisionProvider implements DecisionProvider {
       state: {
         objective: request.intent.objective,
         constraints: request.intent.constraints,
+        // Guidance is state the model weighs, not an instruction that can widen the candidate set.
+        ...(request.guidance ? { guidance: { criteria: request.guidance.criteria, escalate: request.guidance.escalate } } : {}),
         observation: request.observation.facts,
         candidates: request.candidates.map((c, index) => ({ option: `c${index}`,
           capability: c.capability, input: c.input, effect: c.effect, resources: c.resources })),
