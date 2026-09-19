@@ -28,7 +28,9 @@ TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexed
 | runtime.test.mjs | 托管运行时：一步一动作、目标先检查、模型 wait 与时间唤醒、事件去重、预算与修订、过期回应、每步批准、guidance 版本、stop/terminate/pause、租约、撤权拒绝、版本变化阻塞、幽灵操作清理、due、意图修订 |
 | runtime-chain.test.mjs | v0.2 验收链路（进程内）：第一步完成 → 第二步回执丢失 → 快照重建 → 按键核对不重复 → 缺信息等人 → 补充后完成 |
 | runtime-kill.test.mjs | 真实 SIGKILL：worker 在派发中被杀，下一次 worker 按幂等键核对，外部提交计数不变，最终 completed |
-| store-conformance.mjs + stores.test.mjs | ExecutionJournal 与 RunStore 的行为契约：claim 原子性、CAS、终态释放预留、一意图一未终态 Run、事件去重、畸形记录拒绝；对内存实现和 PGlite 上的 PostgreSQL 实现各跑一遍，另测迁移幂等与锁冲突不留残余 |
+| store-conformance.mjs + stores.test.mjs | ExecutionJournal、RunStore 与 DecisionStore 的行为契约：claim 原子性、CAS、终态释放预留、一意图一未终态 Run、事件去重、畸形记录拒绝、决策去重/回填/按意图与标签查询；对内存实现和 PGlite 上的 PostgreSQL 实现各跑一遍，另测迁移幂等与锁冲突不留残余 |
+| decisions.test.mjs | 决策记录：考虑/排除/请求/决策/回填执行记录；无候选与决策器失败的记录；审计存储失败不改变结果；tags 校验 |
+| replay.test.mjs | 运行时决策记录带 runId；时间线顺序；用不同决策器重评的一致/不一致/失败；CLI 从导出 JSON 打印时间线且不派发任何动作 |
 | runtime-pg.test.mjs | 验收链路在 PostgreSQL 存储上重跑（回执丢失 + 重启），以及两个 worker 争夺同一 Run 时只有一个拿到租约 |
 | jev.test.mjs | 实际 HTTP shape、候选映射、概率校验、错误脱敏、deadline、体积限制 |
 | examples.test.mjs | 两个不同宿主使用相同内核，不联网即可完成模拟闭环 |

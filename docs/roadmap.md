@@ -13,9 +13,11 @@
 | PR 1 | 稳定动作身份（不含 activation）、journal 导出/导入、未终态记录按精确插件版本重新绑定后查询核对、机器可读拒绝码、重启示例 | 已完成 |
 | PR 2 | Run 契约与状态机、`step(runId)` 串行推进、GoalEvaluator、结构化等待条件、四类慢思考回应、预算与无进展检测、Run 所有权租约、通用模拟宿主与真实 SIGKILL 验收 | 已完成 |
 | PR 3 | PostgreSQL 存储：`./pg` 子路径、注入式 SQL 客户端、每个操作一条语句、与内存实现共用一套一致性测试、验收链路在 PGlite 上重跑 | 已完成 |
-| PR 4 | DecisionRecord 与只读回放 | 未开始 |
+| PR 4 | DecisionRecord（只来自 propose 已计算的内容）、内存与 PostgreSQL 决策存储、`timeline()` / `reevaluate()`、只读回放 CLI | 已完成 |
 
-PR 3 的 SQL 在 PGlite（编译成 WebAssembly 的 PostgreSQL）上离线验证；设置 `COGNITIVE_HUB_PG_URL` 并安装 `pg` 可对真实服务器运行同一套测试，CI 未接入真实服务器。SIGKILL 链路仍在文件存储上验证，PostgreSQL 上只做进程内重启。
+v0.2 四步全部完成。PR 3 的 SQL 在 PGlite（编译成 WebAssembly 的 PostgreSQL）上离线验证；设置 `COGNITIVE_HUB_PG_URL` 并安装 `pg` 可对真实服务器运行同一套测试，CI 未接入真实服务器。SIGKILL 链路仍在文件存储上验证，PostgreSQL 上只做进程内重启。
+
+v0.3 候选，按价值排序：阶段 A 的真实宿主只读接入；取消/补偿端口；outbox 与 journal retention；人工请求持久化；C# 接入端。以下阶段保持原有描述。
 
 ## 阶段 A：一个真实宿主的只读/旁路接入（v0.2 之后）
 

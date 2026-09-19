@@ -30,6 +30,8 @@
 
 已实现（存储）：PostgreSQL 适配器 `@cognitive-hub/core/pg`，注入式 SQL 客户端、每个操作一条语句、与内存实现共用一套一致性测试。
 
+已实现（可观测）：决策记录（每轮 propose 考虑了什么、被策略排除了什么、决策器看到了什么、选了什么、对应哪条执行记录）与只读回放（时间线、用另一个决策器重评）。
+
 尚未实现：outbox、内置后台循环（宿主调度 `due()` / `step()`）、分布式资源锁、网络认证服务、签名执行许可、插件沙箱/市场、MCP、C# SDK、真实机器人适配器、任意目标规划、取消/补偿端口。详见 [实现边界](docs/architecture.md) 和 [路线图](docs/roadmap.md)。
 
 原始 [v0.1 蓝图](docs/cognitive-hub-v0.1-blueprint.md) 保留不改；其中的 Issue 应用和大平台规划不是当前实现。本仓库以嵌入式插件内核为基线。
@@ -142,6 +144,19 @@ const runtime = new IntentRuntime({ ...ports, journal: new PgJournal(pool), runs
 
 离线测试用 PGlite（编译成 WebAssembly 的真 PostgreSQL）运行同一套一致性测试和验收链路。设置 `COGNITIVE_HUB_PG_URL` 并自行安装 `pg` 后，同一套测试会额外对真实服务器运行；CI 未接入真实服务器。
 
+## 决策记录与只读回放（可选）
+
+配置 `decisions` 后，每轮 `propose()` 写一条 `DecisionRecord`：观测版本、未被请求的能力、每个能力产生的候选数、被策略排除的动作与原因、决策器看到的完整请求、决策、结果、错误码，执行 claim 后回填 journal 记录 ID。它回答"为什么这次没选那个能力"，写入失败只计数，不改变执行结果。
+
+```ts
+const decisions = new MemoryDecisionStore();            // 或 new PgDecisionStore(pool)
+const runtime = new IntentRuntime({ ...ports, decisions });
+const entries = await timeline({ decisions, journal: runtime.hub.journal, runs: runtime.runs }, { runId });
+const check = await reevaluate(await decisions.list({ tag: { key: 'runId', value: runId } }), anotherDecider);
+```
+
+`node scripts/replay.mjs <dir> --run <id>` 从导出的 JSON 打印时间线；`--reevaluate jev` 会把记录的状态发送给 TypeSafe 重新判断并统计一致率，需要显式设置密钥。回放绝不构造 Hub，绝不派发动作。
+
 ## 插件带来的是什么？
 
 插件通过 `setup(ctx)` 注册能力和服务，通过 `manifest.requires/provides` 声明依赖。一个能力包含 `prepare → validate → check → execute → verify`，必要时提供只查询、不重放的 `reconcile`。
@@ -162,6 +177,7 @@ const runtime = new IntentRuntime({ ...ports, journal: new PgJournal(pool), runs
 | [托管运行时](docs/runtime.md) | Run 生命周期、step 顺序、等待与唤醒、慢思考往返、预算、恢复 |
 | [架构决策 0003](docs/adr/0003-managed-runtime.md) | 为什么是显式 step 而不是后台循环，Guidance 与 Policy 的分离 |
 | [架构决策 0004](docs/adr/0004-postgres-adapters.md) | 注入 SQL 客户端、每操作一条语句、用 PGlite 离线验证 |
+| [架构决策 0005](docs/adr/0005-decision-records.md) | 决策记录只来自已计算的内容、写入失败不致命、回放不执行 |
 | [安全说明](SECURITY.md) | 为什么进程内插件不是沙箱 |
 | [路线图](docs/roadmap.md) | 从基础内核到真实宿主的验收条件 |
 

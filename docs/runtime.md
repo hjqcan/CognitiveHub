@@ -15,7 +15,7 @@ const run = await runtime.start({ intent, approval: 'automatic',
 for (const id of await runtime.due()) await runtime.step(id);
 ```
 
-运行时自己构造内部的 `CognitiveHub`（`runtime.hub` 可直接使用），并把 `hub.propose()` 里产生的慢思考请求打上 `runId`，宿主据此调用 `respond()`。
+运行时自己构造内部的 `CognitiveHub`（`runtime.hub` 可直接使用），并把 `hub.propose()` 里产生的慢思考请求打上 `runId`，宿主据此调用 `respond()`。配置 `decisions` 后，每轮决策记录也带 `tags.runId`，`timeline({ decisions, journal, runs }, { runId })` 能按 Run 读回"考虑了什么、排除了什么、选了什么、执行结果如何"。
 
 ## 1. 对象
 

@@ -12,6 +12,8 @@ Jev requests transmit supplied state to the configured HTTPS endpoint. Only prov
 
 The PostgreSQL adapters take an injected client and issue only parameterized statements; they never interpolate data into SQL. The host owns credentials, pooling, TLS and the DDL rights `migrate()` needs. The `data` columns hold the same business data as the memory journal.
 
+Decision records store the full request the decider saw, including observation facts and bound candidate inputs; govern them like the journal. `scripts/replay.mjs --reevaluate jev` sends recorded state to the external API and only runs with an explicitly provided key.
+
 Memory journals and deliberation inboxes contain business data. They require host-side access control, retention, deletion, and encrypted persistence before production. The event sink is observability, not a durable security audit.
 
 Do not commit `.env`, live API keys, production traces, or customer data. If reporting a vulnerability, avoid publishing secrets or weaponized details in public issues; use GitHub private vulnerability reporting if the repository enables it, otherwise contact the maintainer privately.

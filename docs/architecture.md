@@ -12,6 +12,7 @@
 | `run.ts` | Run、预算、等待条件、慢思考回应、目标验收与 Run 存储契约 |
 | `runtime.ts` | 可选的托管运行时：按 `step()` 串行推进、唤醒、批准、预算、恢复；见 `docs/runtime.md` |
 | `pg.ts` | PostgreSQL 适配器（`./pg` 入口）：注入式 SQL 客户端、幂等 DDL、每个操作一条语句 |
+| `replay.ts` | 只读回放：按意图或 Run 生成时间线，用另一个决策器重评记录的请求；不构造 Hub |
 | `jev.ts` | TypeSafe `/v1/systemone` Choice 协议适配，不模拟聊天工具调用 |
 | `memory.ts` | 单进程日志（可导出、可从记录重建）、资源预留、人工收件箱、事件缓冲 |
 | `primitives.ts` | 不可变快照、JSON 校验、确定性序列化、截止时间、记录/回执形状校验、动作身份 |
@@ -95,6 +96,8 @@ MemoryJournal 的 claim 原子预留操作 ID 和资源；replace 是版本比�
 | `journal-conflict` | 另一个 Hub 实例先一步推进了这条记录，重新 reconcile 即可收敛 |
 
 所有来源为普通 JSON，拒绝循环、非有限数值和隐式 undefined。事件默认只含 ID、类型和状态，不自动记录完整原始输入；journal/inbox 仍含业务数据，宿主需治理。
+
+可选的 `DecisionStore` 记录每轮 propose：观测版本、guidance 版本、作用域内未被请求的能力、每个能力产生的草案数、被策略排除的动作与原因、决策器看到的完整请求、决策、结果种类与错误码、提案 ID 或慢思考请求 ID；执行 claim 之后回填 journal 记录 ID。调用方可以附加字符串 `tags`（托管运行时写入 `runId`）。它只来自 propose 已经计算的内容，不增加模型调用；写入失败像观察器异常一样计数并发出 `decision.record.failed`，从不改变结果。记录里的请求含观测事实与候选参数，治理要求同 journal。
 
 ## 7. 人类慢思考
 
