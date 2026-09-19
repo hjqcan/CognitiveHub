@@ -4,10 +4,22 @@
   "private": true,
   "description": "Embeddable, plugin-first cognitive middleware between deliberation and execution.",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
-    "./jev": { "types": "./dist/jev.d.ts", "import": "./dist/jev.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./jev": {
+      "types": "./dist/jev.d.ts",
+      "import": "./dist/jev.js"
+    },
+    "./pg": {
+      "types": "./dist/pg.d.ts",
+      "import": "./dist/pg.js"
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -16,5 +28,8 @@
     "demo": "npm run build && node examples/robot-platform.mjs",
     "check": "npm run typecheck && npm test"
   },
-  "devDependencies": { "typescript": "5.8.3" }
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "typescript": "5.8.3"
+  }
 }

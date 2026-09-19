@@ -33,6 +33,7 @@ export class MemoryJournal implements ExecutionJournal {
   async get(id: string): Promise<ExecutionRecord | undefined> { return this.#records.get(id); }
   async unsettled(): Promise<readonly ExecutionRecord[]> { return [...this.#records.values()].filter(r => !terminal(r.status)); }
   async claim(record: ExecutionRecord): Promise<Claim> {
+    assertRecord(record);
     const existing = this.#records.get(record.id);
     if (existing) return existing.fingerprint === record.fingerprint
       ? { kind: 'existing', record: existing }
@@ -45,6 +46,7 @@ export class MemoryJournal implements ExecutionJournal {
     return { kind: 'claimed' };
   }
   async replace(record: ExecutionRecord, expectedRevision: number): Promise<void> {
+    assertRecord(record);
     const current = this.#records.get(record.id);
     ensure(current && current.revision === expectedRevision && record.revision === expectedRevision + 1,
       'journal-conflict', 'Execution record version conflict');
