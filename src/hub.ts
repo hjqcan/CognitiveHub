@@ -3,9 +3,10 @@ import type {
   EventSink, ExecutionContext, ExecutionJournal, ExecutionRecord, ExecutionResult,
   Intent, Json, Observation, Policy, ProposalResult, Receipt, StateProvider, Verification,
 } from './contracts.js';
-import { PluginHost, type CapabilityLease } from './plugins.js';
+import type { CapabilityLease } from './plugins.js';
+import { PluginHost } from './plugins.js';
 import { MemoryJournal, terminal } from './memory.js';
-import { assertJson, bounded, canonical, ensure, identifier, immutable, newId, validScope } from './primitives.js';
+import { assertJson, bounded, canonical, ensure, HubError, identifier, immutable, newId, validScope } from './primitives.js';
 
 interface Proposal {
   id: string;
@@ -16,7 +17,12 @@ interface Proposal {
   policyVersion: string;
   expiresAt: number;
 }
-interface Pending { lease: CapabilityLease; context: ExecutionContext }
+interface Pending {
+  readonly lease: CapabilityLease;
+  readonly context: ExecutionContext;
+  callbacks: number;
+  terminal: boolean;
+}
 export interface HubOptions {
   plugins: PluginHost;
   state: StateProvider;
@@ -241,14 +247,21 @@ export class CognitiveHub {
       // Retain the plugin and resources until a terminal result is durably recorded.
       retained = true;
       this.#consumed.set(proposalId, id);
-      this.#pending.set(id, { lease, context });
+      const pending: Pending = { lease, context, callbacks: 0, terminal: false };
+      this.#pending.set(id, pending);
       this.#emit('execution.submitted', { id, operationId, capability: action.capability });
       let receipt: Receipt;
-      if (options.signal?.aborted || proposal.expiresAt <= this.#now() || this.#options.plugins.status(action.pluginId) !== 'active') {
-        receipt = { status: 'failed', reason: 'Cancelled/expired before dispatch', evidence: null };
+      const now = this.#now();
+      const rejection = options.signal?.aborted ? 'cancelled'
+        : proposal.expiresAt <= now ? 'proposal-expired'
+        : context.observation.validUntil <= now ? 'observation-expired'
+        : this.#options.plugins.status(action.pluginId) !== 'active' ? 'plugin-stopping' : null;
+      if (rejection) {
+        this.#emit('execution.dispatch.rejected', { id, code: rejection });
+        receipt = { status: 'failed', reason: rejection, evidence: null };
       } else {
         try {
-          receipt = this.#receipt(await bounded(this.#executionTimeout, options.signal,
+          receipt = this.#receipt(await this.#invoke(pending, 'execute', options.signal,
             signal => capability.execute({ ...context, signal })));
         } catch {
           // Timeouts, malformed replies and lost connections may hide an actual effect.
@@ -279,25 +292,58 @@ export class CognitiveHub {
     if (value.status !== 'unknown') assertJson(value.evidence);
     return immutable(value);
   }
+
+  #releasePending(pending: Pending): void {
+    if (!pending.terminal || pending.callbacks > 0) return;
+    const id = pending.context.idempotencyKey;
+    pending.lease.release();
+    this.#pending.delete(id);
+    this.#emit('execution.lease.released', { id });
+  }
+
+  /** A deadline ends waiting; each actual callback keeps the plugin alive until it settles. */
+  async #invoke<T>(pending: Pending, phase: 'execute' | 'verify' | 'reconcile', signal: AbortSignal | undefined,
+    operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const id = pending.context.idempotencyKey;
+    try {
+      return await bounded(this.#executionTimeout, signal, async callbackSignal => {
+        pending.callbacks++;
+        this.#emit('execution.callback.started', { id, phase, callbacks: pending.callbacks });
+        try { return await operation(callbackSignal); }
+        finally {
+          pending.callbacks--;
+          this.#emit('execution.callback.settled', { id, phase, callbacks: pending.callbacks,
+            aborted: callbackSignal.aborted, terminal: pending.terminal });
+          this.#releasePending(pending);
+        }
+      });
+    } catch (error) {
+      this.#emit('execution.callback.unavailable', { id, phase,
+        code: error instanceof HubError ? error.code : 'callback-error' });
+      throw error;
+    }
+  }
+
   async #replace(record: ExecutionRecord, patch: Partial<Pick<ExecutionRecord, 'status' | 'receipt' | 'evidence'>>): Promise<ExecutionRecord> {
     const next = immutable({ ...record, ...patch, revision: record.revision + 1 });
     await this.journal.replace(next, record.revision);
     this.#emit('execution.updated', { id: next.id, status: next.status });
     if (terminal(next.status)) {
-      this.#pending.get(next.id)?.lease.release();
-      this.#pending.delete(next.id);
+      const pending = this.#pending.get(next.id);
+      if (pending) { pending.terminal = true; this.#releasePending(pending); }
     }
     return next;
   }
-  async #settle(record: ExecutionRecord, receipt: Receipt): Promise<ExecutionRecord> {
+  async #settle(record: ExecutionRecord, receipt: Receipt,
+    options: { verifyAccepted?: boolean; signal?: AbortSignal } = {}): Promise<ExecutionRecord> {
     if (receipt.status === 'unknown') return this.#replace(record, { status: 'unknown', receipt });
     if (receipt.status === 'failed') return this.#replace(record, { status: 'failed', receipt, evidence: receipt.evidence });
     record = await this.#replace(record, { status: 'pending', receipt });
-    if (receipt.status === 'accepted') return record;
+    if (receipt.status === 'accepted' && !options.verifyAccepted) return record;
     const pending = this.#pending.get(record.id)!;
     let verification: Verification;
     try {
-      verification = await bounded(this.#executionTimeout, undefined, signal =>
+      verification = await this.#invoke(pending, 'verify', options.signal, signal =>
         pending.lease.registration.capability.verify({ ...pending.context, signal }, receipt));
       assertJson(verification);
       ensure(['verified', 'pending', 'failed'].includes(verification.status), 'invalid-verification', 'Invalid verifier status');
@@ -319,12 +365,12 @@ export class CognitiveHub {
       let receipt = record.receipt;
       if (capability.reconcile) {
         try {
-          receipt = this.#receipt(await bounded(this.#executionTimeout, options.signal,
+          receipt = this.#receipt(await this.#invoke(pending, 'reconcile', options.signal,
             signal => capability.reconcile!({ ...pending.context, signal }, record.receipt)));
         } catch { return { kind: 'record', record, duplicate: true }; }
       }
       if (!receipt) return { kind: 'record', record, duplicate: true };
-      return { kind: 'record', record: await this.#settle(record, receipt), duplicate: false };
+      return { kind: 'record', record: await this.#settle(record, receipt, { ...options, verifyAccepted: true }), duplicate: false };
     } finally { this.#executing.delete(id); }
   }
 }

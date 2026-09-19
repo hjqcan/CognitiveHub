@@ -207,3 +207,87 @@ test('a failed human delivery is surfaced once rather than issuing duplicate req
   await assert.rejects(f.hub.propose(intent({ capabilities: [] })), /inbox unavailable/);
   assert.equal(calls, 1);
 });
+
+test('observation expiry during journal claim rejects dispatch and releases resources', async () => {
+  let f, observations = 0;
+  f = await fixture({ hub: { state: { observe: async () => ({ version: 'v1', observedAt: f.control.now,
+    validUntil: f.control.now + (++observations === 2 ? 10 : 10000), facts: { blocked: true } }) } } });
+  const claim = f.journal.claim.bind(f.journal);
+  f.journal.claim = async record => { const result = await claim(record); f.control.now += 20; return result; };
+  const p = await f.hub.propose(intent());
+  const rejected = await f.hub.execute(p.id, 'expired-state', { live: true });
+  assert.equal(rejected.record.status, 'failed'); assert.equal(f.control.calls, 0);
+  assert.ok(f.events.entries().some(e => e.type === 'execution.dispatch.rejected' && e.data.code === 'observation-expired'));
+  const fresh = await f.hub.propose(intent());
+  assert.equal((await f.hub.execute(fresh.id, 'fresh-state', { live: true })).record.status, 'verified');
+  assert.equal(f.control.calls, 1); await f.plugins.stop('robot');
+});
+
+for (const withQuery of [false, true]) test(`accepted receipts can be independently verified on reconciliation (query=${withQuery})`, async () => {
+  const accepted = { status: 'accepted', handle: 'H1', evidence: null }; let receiptSeen;
+  const f = await fixture({ capability: {
+    execute: async () => accepted,
+    ...(withQuery ? { reconcile: async () => accepted } : {}),
+    verify: async (_context, receipt) => { receiptSeen = receipt; return { status: 'verified', evidence: { task: 'done' } }; },
+  } });
+  const p = await f.hub.propose(intent());
+  const initial = await f.hub.execute(p.id, 'async-task', { live: true });
+  assert.equal(initial.record.status, 'pending'); assert.equal(receiptSeen, undefined);
+  const checked = await f.hub.reconcile(initial.record.id);
+  assert.equal(checked.record.status, 'verified'); assert.equal(receiptSeen.handle, 'H1');
+  assert.deepEqual(checked.record.evidence, { task: 'done' });
+  await f.plugins.stop('robot');
+});
+
+test('accepted verification remains pending until evidence is conclusive', async () => {
+  let outcome = 'pending';
+  const f = await fixture({ capability: {
+    execute: async () => ({ status: 'accepted', handle: 'H1', evidence: null }),
+    verify: async () => ({ status: outcome, evidence: { taskState: outcome } }),
+  } });
+  const p = await f.hub.propose(intent());
+  const initial = await f.hub.execute(p.id, 'async-task', { live: true });
+  assert.equal((await f.hub.reconcile(initial.record.id)).record.status, 'pending');
+  const other = await f.hub.propose(intent({ id: 'other-task' }));
+  assert.equal((await f.hub.execute(other.id, 'other-op', { live: true })).kind, 'rejected');
+  let stopped = false; const stop = f.plugins.stop('robot').then(() => { stopped = true; });
+  await tick(); assert.equal(stopped, false);
+  outcome = 'failed';
+  assert.equal((await f.hub.reconcile(initial.record.id)).record.status, 'failed');
+  await stop;
+});
+
+for (const phase of ['execute', 'verify', 'reconcile']) {
+  for (const rejectLate of [false, true]) test(`late ${phase} callback retains its plugin until settlement (reject=${rejectLate})`, async () => {
+    const gate = deferred(); let f, callbackCalls = 0, touchedDisposedPlugin = false;
+    const completed = { status: 'completed', evidence: null };
+    const verified = { status: 'verified', evidence: null };
+    const delayed = async () => {
+      callbackCalls++;
+      if (callbackCalls === 1) {
+        await gate.promise; touchedDisposedPlugin = f.control.disposed;
+        if (rejectLate) throw new Error('late callback failure');
+      }
+      return phase === 'verify' ? verified : completed;
+    };
+    f = await fixture({ hub: { executionTimeoutMs: 20 }, capability: {
+      execute: phase === 'execute' ? delayed : async () => phase === 'reconcile'
+        ? { status: 'accepted', handle: 'H1', evidence: null } : completed,
+      verify: phase === 'verify' ? delayed : async () => verified,
+      reconcile: phase === 'reconcile' ? delayed : async () => completed,
+    } });
+    const p = await f.hub.propose(intent());
+    const initial = await f.hub.execute(p.id, 'late-callback', { live: true });
+    if (phase === 'reconcile') await f.hub.reconcile(initial.record.id);
+    const result = await f.hub.reconcile(initial.record.id);
+    assert.equal(result.record.status, 'verified');
+    let stopped = false; const stop = f.plugins.stop('robot').then(() => { stopped = true; });
+    try {
+      await tick(); assert.equal(stopped, false); assert.equal(f.control.disposed, false);
+      assert.ok(f.events.entries().some(e => e.type === 'execution.callback.unavailable' && e.data.phase === phase && e.data.code === 'timeout'));
+    } finally { gate.resolve(); await stop; }
+    assert.equal(touchedDisposedPlugin, false);
+    assert.deepEqual(await f.journal.get(initial.record.id), result.record);
+    assert.ok(f.events.entries().some(e => e.type === 'execution.lease.released'));
+  });
+}

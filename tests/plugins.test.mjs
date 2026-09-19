@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PluginHost } from '../dist/index.js';
-import { fixture, intent, tick } from './fixtures.mjs';
+import { deferred, fixture, intent, tick } from './fixtures.mjs';
 const plugin = (id, setup, extra = {}) => ({ manifest: { apiVersion: 1, id, version: '1.0.0', ...extra }, setup });
 
 test('activation resolves declared services independent of installation order', async () => {
@@ -74,4 +74,107 @@ test('reactivation invalidates previously issued proposals even at the same plug
   await f.plugins.stop('robot'); await f.plugins.start();
   assert.equal((await f.hub.execute(proposal.id, 'op', { live: true })).kind, 'rejected');
   assert.equal(f.control.calls, 0);
+});
+
+for (const fail of [false, true]) test(`a staged batch is hidden until commit, including when rollback is ${fail}`, async () => {
+  const f = await fixture(), host = f.plugins, entered = deferred(), gate = deferred();
+  let disposed = false;
+  host.install(plugin('staged', ctx => {
+    ctx.provide('staged.v1', 42); ctx.capability(f.capability);
+    ctx.onDispose(() => { disposed = true; });
+  }, { provides: ['staged.v1'] }));
+  host.install(plugin('consumer', async ctx => {
+    assert.equal(ctx.service('staged.v1'), 42);
+    entered.resolve(); await gate.promise;
+    if (fail) throw new Error('later setup failed');
+  }, { requires: ['staged.v1'] }));
+  const start = host.start();
+  const completed = fail ? assert.rejects(start, /later setup failed/) : start;
+  await entered.promise;
+  try {
+    assert.equal(host.status('staged'), 'starting');
+    assert.throws(() => host.resolve('staged.v1'), { code: 'missing-service' });
+    assert.deepEqual(host.list(intent().scope).map(r => r.pluginId), ['robot']);
+    assert.throws(() => host.acquire('staged', f.capability.id, 1, intent().scope), { code: 'unavailable-capability' });
+    const p = await f.hub.propose(intent());
+    assert.equal((await f.hub.execute(p.id, 'existing-plugin', { live: true })).record.status, 'verified');
+  } finally { gate.resolve(); await completed; }
+  assert.equal(disposed, fail);
+  assert.equal(host.status('staged'), fail ? 'stopped' : 'active');
+  assert.equal(host.status('robot'), 'active');
+  if (!fail) {
+    assert.equal(host.resolve('staged.v1'), 42);
+    await host.stop('consumer'); await host.stop('staged');
+  }
+  await host.stop('robot');
+});
+
+test('new consumers and saved contexts cannot resolve a draining provider', async () => {
+  const f = await fixture(), host = new PluginHost(); let context, consumerStarted = false;
+  host.install(plugin('provider', ctx => {
+    context = ctx; ctx.provide('service.v1', 42); ctx.capability(f.capability);
+  }, { provides: ['service.v1'] }));
+  await host.start();
+  const registration = host.list(intent().scope)[0];
+  const lease = host.acquire('provider', f.capability.id, registration.activation, intent().scope);
+  const stop = host.stop('provider');
+  try {
+    assert.throws(() => context.service('service.v1'), { code: 'missing-service' });
+    host.install(plugin('consumer', ctx => {
+      ctx.service('service.v1'); consumerStarted = true;
+    }, { requires: ['service.v1'] }));
+    await assert.rejects(host.start(), { code: 'missing-dependency' });
+    assert.equal(consumerStarted, false);
+  } finally { lease.release(); await stop; }
+  await host.start();
+  assert.equal(consumerStarted, true);
+  await host.stop('consumer'); await host.stop('provider'); await f.plugins.stop('robot');
+});
+
+test('async cleanup retains dependency protection and prevents reactivation', async () => {
+  const host = new PluginHost(), entered = deferred(), gate = deferred();
+  const service = { disposed: false }; let activations = 0;
+  host.install(plugin('provider', ctx => {
+    ctx.provide('service.v1', service); ctx.onDispose(() => { service.disposed = true; });
+  }, { provides: ['service.v1'] }));
+  host.install(plugin('consumer', ctx => {
+    activations++; const dependency = ctx.service('service.v1');
+    ctx.onDispose(async () => {
+      entered.resolve(); await gate.promise; assert.equal(dependency.disposed, false);
+    });
+  }, { requires: ['service.v1'] }));
+  await host.start(); const stop = host.stop('consumer'); await entered.promise;
+  try {
+    assert.equal(host.status('consumer'), 'draining');
+    await assert.rejects(host.stop('provider'), { code: 'active-dependent' });
+    await host.start(); assert.equal(activations, 1);
+  } finally { gate.resolve(); await stop; }
+  assert.equal(host.status('consumer'), 'stopped');
+  await host.stop('provider'); assert.equal(service.disposed, true);
+});
+
+test('rollback cleanup failure marks the unpublished plugin failed', async () => {
+  const host = new PluginHost();
+  host.install(plugin('first', ctx => {
+    ctx.provide('first.v1', 42); ctx.onDispose(() => { throw new Error('cleanup failed'); });
+  }, { provides: ['first.v1'] }));
+  host.install(plugin('later', () => { throw new Error('setup failed'); }));
+  await assert.rejects(host.start(), AggregateError);
+  assert.equal(host.status('first'), 'failed');
+  assert.throws(() => host.resolve('first.v1'), { code: 'missing-service' });
+});
+
+for (const fail of [false, true]) test(`staged services can resolve dependencies during setup and cleanup (rollback=${fail})`, async () => {
+  const host = new PluginHost(); let cleaned = false;
+  host.install(plugin('base', ctx => ctx.provide('base.v1', 42), { provides: ['base.v1'] }));
+  host.install(plugin('forward', ctx => ctx.provide('forward.v1', () => ctx.service('base.v1')),
+    { requires: ['base.v1'], provides: ['forward.v1'] }));
+  host.install(plugin('consumer', ctx => {
+    assert.equal(ctx.service('forward.v1')(), 42);
+    ctx.onDispose(() => { assert.equal(ctx.service('forward.v1')(), 42); cleaned = true; });
+    if (fail) throw new Error('consumer failed');
+  }, { requires: ['forward.v1'] }));
+  if (fail) await assert.rejects(host.start(), /consumer failed/);
+  else { await host.start(); await host.stop('consumer'); await host.stop('forward'); await host.stop('base'); }
+  assert.equal(cleaned, true);
 });

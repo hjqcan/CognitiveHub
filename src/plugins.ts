@@ -13,6 +13,10 @@ interface Mount {
   disposers: Dispose[];
   drained?: () => void;
 }
+interface ActivationBatch {
+  readonly started: Mount[];
+  open: boolean;
+}
 export interface CapabilityLease {
   readonly registration: CapabilityRegistration;
   release(): void;
@@ -39,32 +43,43 @@ export class PluginHost {
     });
   }
 
-  /** Activate a batch in service dependency order; roll back this batch on failure. */
+  /** Stage a batch in dependency order and publish only after every setup succeeds. */
   async start(): Promise<void> {
     ensure(!this.#starting, 'host-busy', 'Activation already running');
     this.#starting = true;
-    const started: Mount[] = [];
+    const batch: ActivationBatch = { started: [], open: true };
+    const { started } = batch;
     try {
       let pending = [...this.#mounts.values()].filter(m => m.status === 'installed' || m.status === 'stopped');
       while (pending.length) {
-        const ready = pending.find(m => (m.plugin.manifest.requires ?? []).every(key => this.#services.has(key)));
+        const ready = pending.find(m => (m.plugin.manifest.requires ?? []).every(key => this.#service(key, started)));
         ensure(ready, 'missing-dependency', 'Unresolved or cyclic plugin service dependencies');
-        await this.#activate(ready);
+        await this.#activate(ready, batch);
         started.push(ready);
         pending = pending.filter(m => m !== ready);
       }
+      // No await here: public resolution cannot observe a partially committed batch.
+      for (const mount of started) mount.status = 'active';
     } catch (error) {
       const errors: unknown[] = [error];
       for (const mount of started.reverse()) {
-        mount.status = 'stopped';
-        try { await this.#dispose(mount); } catch (e) { errors.push(e); }
+        mount.status = 'draining';
+        try { await this.#dispose(mount); mount.status = 'stopped'; }
+        catch (e) { mount.status = 'failed'; errors.push(e); }
       }
       if (errors.length > 1) throw new AggregateError(errors, 'Plugin batch activation and rollback failed');
       throw error;
-    } finally { this.#starting = false; }
+    } finally { batch.open = false; this.#starting = false; }
   }
 
-  async #activate(mount: Mount): Promise<void> {
+  #service(key: string, staged: readonly Mount[] = []) {
+    const service = this.#services.get(key);
+    const owner = service && this.#mounts.get(service.owner);
+    return owner && (owner.status === 'active' || (owner.status === 'starting' && staged.includes(owner)))
+      ? service : undefined;
+  }
+
+  async #activate(mount: Mount, batch: ActivationBatch): Promise<void> {
     mount.status = 'starting'; mount.activation++;
     const { manifest } = mount.plugin;
     let open = true;
@@ -74,8 +89,11 @@ export class PluginHost {
       service: <T>(key: string): T => {
         ensure([...(manifest.requires ?? []), ...(manifest.provides ?? [])].includes(key),
           'undeclared-service', `Declare dependency ${key}`);
-        ensure(this.#services.has(key), 'missing-service', `Service ${key} is unavailable`);
-        return this.#services.get(key)!.value as T;
+        // Internal services and rollback cleanup may use this batch's completed setups.
+        // Closing the batch prevents saved contexts from exposing a later activation.
+        const service = this.#service(key, batch.open ? [...batch.started, ...(open ? [mount] : [])] : []);
+        ensure(service, 'missing-service', `Service ${key} is unavailable`);
+        return service.value as T;
       },
       provide: (key, value) => {
         registering();
@@ -91,11 +109,12 @@ export class PluginHost {
     };
     try {
       const dispose = await mount.plugin.setup(ctx);
+      open = false;
       if (dispose) mount.disposers.push(dispose);
       for (const key of manifest.provides ?? [])
         ensure(this.#services.get(key)?.owner === manifest.id, 'missing-service', `Plugin did not provide ${key}`);
-      mount.status = 'active';
     } catch (error) {
+      open = false;
       mount.status = 'failed';
       try { await this.#dispose(mount); }
       catch (cleanup) { throw new AggregateError([error, cleanup], 'Activation and cleanup failed'); }
@@ -129,8 +148,8 @@ export class PluginHost {
   }
 
   resolve<T>(key: string): T {
-    const service = this.#services.get(key);
-    ensure(service && this.#mounts.get(service.owner)?.status === 'active', 'missing-service', `No active service ${key}`);
+    const service = this.#service(key);
+    ensure(service, 'missing-service', `No active service ${key}`);
     return service.value as T;
   }
   list(scope: Scope): readonly CapabilityRegistration[] {
@@ -164,8 +183,8 @@ export class PluginHost {
     ensure(!dependent, 'active-dependent', `Stop dependent ${dependent?.plugin.manifest.id ?? ''} first`);
     mount.status = 'draining';
     if (mount.leases > 0) await new Promise<void>(resolve => { mount.drained = resolve; });
-    mount.status = 'stopped';
-    try { await this.#dispose(mount); } catch (e) { mount.status = 'failed'; throw e; }
+    try { await this.#dispose(mount); mount.status = 'stopped'; }
+    catch (e) { mount.status = 'failed'; throw e; }
   }
   async #dispose(mount: Mount): Promise<void> {
     const errors: unknown[] = [];

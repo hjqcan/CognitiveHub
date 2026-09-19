@@ -19,6 +19,8 @@
 
 **插件**：`installed → starting → active → draining → stopped`，激活或清理失败进入 `failed`。依赖通过版本化服务名声明；不做动态 semver 求解，也不兼容 Cordis/dsh ABI。
 
+一个启动批次在所有 setup 成功后统一对外可见；批次内部可以访问已完成 setup 的依赖。回滚不会暴露可被 Hub 获取的新能力。draining 持续到租约排空且所有 disposer 完成，在此期间拒绝新的依赖消费者和重新激活。
+
 **提案**：有短期有效期，是宿主内存中的不透明 ID。动作绑定插件激活代次、能力契约、参数、作用域、状态版本、策略版本和意图版本。首次真实提交绑定一个 operationId；不能用同一提案执行多个不同操作。预览不消耗它。过期提案会在新提案创建时清理，也可显式 `discard()`。
 
 **执行**：
@@ -29,7 +31,7 @@ submitted ──→ pending ──→ verified
     └──────→ unknown ──→ pending / verified / failed
 ```
 
-`accepted` 仅表示远端受理，停在 pending。`completed` 仍须调用 verifier。核验无法完成时保持 pending；未知结果不自动重放。terminal 表示这个动作的观察结果已确定，不表示用户的整体目标已经完成。
+`accepted` 仅表示远端受理，首次提交后停在 pending；后续 reconcile 会用 verifier 核对 accepted/completed 回执，没有能力 reconcile 时也可通过 accepted 的 handle 验证。`completed` 仍须调用 verifier。核验无法完成时保持 pending；未知结果不自动重放。terminal 表示这个动作的观察结果已确定，不表示用户的整体目标已经完成。
 
 ## 3. 决策与权限
 
@@ -37,7 +39,7 @@ submitted ──→ pending ──→ verified
 
 候选经过意图能力白名单、插件作用域和宿主策略过滤。模型只能选择实际候选、等待或请求慢思考。Hub 不会把被拒绝的动作偷偷转换成另一动作。
 
-执行前重新观察状态、检查策略版本、校验参数和前置条件；异步前置检查之后再核对授权。模型、候选、提案和记录采用不可变快照，不能靠修改公开返回对象改变提交参数。
+执行前重新观察状态、检查策略版本、校验参数和前置条件；异步前置检查之后再核对授权。等待 journal claim 后、实际派发前，同时检查提案和本次新观测的有效期；过期则记录未派发失败并释放资源。模型、候选、提案和记录采用不可变快照，不能靠修改公开返回对象改变提交参数。
 
 这些检查仍存在远程 TOCTOU 窗口：最终宿主接口必须支持资源版本条件、授权检查和原子提交。只在调用前重新读取一次，不提供端到端原子性保证。
 
@@ -57,7 +59,7 @@ MemoryJournal 的 claim 原子预留操作 ID 和资源；replace 是版本比�
 
 一次提案/操作不能并发提交两次。决策、预检、提交和验证有明确时间上限。超时只结束等待，不证明外部操作被取消。忽略 AbortSignal 的代码可能仍在运行；决策和预检的插件租约保留到实际回调结束，迟到的模型结果不会提交执行。
 
-插件开始 draining 后，新候选不可见；尚未派发的动作会被拒绝。在途执行继续保留 capability lease，使用既有 verifier/reconcile，直到终态后才能清理插件。
+插件开始 draining 后，新候选不可见；尚未派发的动作会被拒绝。在途执行继续保留 capability lease，使用既有 verifier/reconcile。执行记录终态和本地回调退出分别跟踪：记录终态后资源预留释放，但插件要等所有 execute/verify/reconcile 回调实际结束才可清理。迟到回调的结果不会覆盖已经记录的状态。
 
 服务端口（decision/state/policy/deliberation）由应用保持存活。当前内核不会自动对 `plugins.resolve()` 返回的任意服务建立生命周期租约；应用应先停止调用/清空在途认知工作，再停止服务提供插件。不要声称所有服务都支持无感热替换。
 
@@ -66,6 +68,8 @@ MemoryJournal 的 claim 原子预留操作 ID 和资源；replace 是版本比�
 执行意图先 claim，再调用执行器。claim 失败不会调用执行器。回执持久化失败向调用者抛出错误，保留插件租约；不能伪装为安全拒绝，也不能在用户重试时重复提交。
 
 内存事件 sink 仅用于观察，不是强制审计日志。观察器异常不会改变执行结果，通过 `observerErrors` 计数。需要持久审计时应实现有正确事务语义的执行存储，而不是只订阅事件。
+
+`execution.dispatch.rejected` 记录派发前拒绝原因；`execution.callback.started/settled/unavailable` 记录操作 ID、阶段、在途回调数、超时或通用错误码；`execution.lease.released` 标记插件租约释放。可用这些事件定位“动作已终态但插件仍在排空”的原因，不记录原始异常正文或凭据。
 
 所有来源为普通 JSON，拒绝循环、非有限数值和隐式 undefined。事件默认只含 ID、类型和状态，不自动记录完整原始输入；journal/inbox 仍含业务数据，宿主需治理。
 

@@ -73,8 +73,9 @@ export interface Capability {
   /** Revalidate local prerequisites; authoritative checks remain at the host. */
   check(context: ExecutionContext): Promise<boolean>;
   execute(context: ExecutionContext): Promise<Receipt>;
+  /** Query independent evidence; reconciliation may supply an accepted receipt and its handle. */
   verify(context: ExecutionContext, receipt: Receipt): Promise<Verification>;
-  /** Read/query only. Never resubmit an unknown action here. */
+  /** Query unknown outcomes without resubmitting. Accepted receipts can use verify directly. */
   reconcile?(context: ExecutionContext, receipt: Receipt | null): Promise<Receipt>;
 }
 export interface DecisionRequest {

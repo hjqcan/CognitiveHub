@@ -30,6 +30,8 @@ export const recoveryPlugin: Plugin = {
 
 重复 pluginId、重复服务、未声明服务访问、声明但没有提供的服务都会失败。缺失/循环依赖不会无限等待。一次 start 中新激活的模块失败后，会逆序撤销该批贡献；已经存在的 active 模块不受影响。
 
+新批次的模块在所有 setup 成功前保持 starting，对外的 `resolve/list/acquire` 不可见。批次内部可以通过 ctx 访问已完成 setup 的依赖，供后续 setup 和回滚清理使用；整批成功后统一变为 active。正在 draining 的服务不能用于启动新消费者。
+
 服务契约通过 `host.tasks.v1` 这样的版本化 key 固定。首版不做 semver 匹配、嵌套容器或同名服务自动覆盖。
 
 setup 结束后贡献窗口关闭。不要保留 ctx 在后台异步注册能力。setup 已完成的注册和 `onDispose()` 都纳入逆序清理；某个 disposer 抛错不会阻止后续清理。
@@ -58,13 +60,17 @@ setup 结束后贡献窗口关闭。不要保留 ctx 在后台异步注册能力
 - failed：执行端确认该操作已终止且结果为失败；不代表自动回滚。
 - unknown：无法确定真实效果，必须查询或由宿主处理。
 
+初次收到 accepted 时保持 pending。后续 `Hub.reconcile()` 会先调用可选的能力 reconcile，再对 accepted/completed 回执调用 verify；没有能力 reconcile 时，verify 可直接使用原 accepted 回执的 handle 查询效果。只有独立证据确认 verified/failed 才进入终态，证据不足返回 pending。unknown 仍需要查询旧操作来恢复，不能靠重新执行来核对。
+
 无法判断是否有副作用时返回 unknown，不要返回 failed。execute 抛错/超时/返回非法结构也按 unknown 处理。验证码、自由文本、运动规划等缺失内容应由慢思考或相应能力提供，不让 Jev 编造。
 
 当前没有取消/补偿端口。中断网络等待不等于取消远端任务。要加入取消能力，应通过新的已授权任务/契约显式实现，不能塞进 dispose。
 
 ## 排空与版本更新
 
-`stop(pluginId)` 先让能力不可见，再等待既有 lease。pending/unknown 期间它可能持续等待，这是保护，不是强行杀掉任务的超时。
+`stop(pluginId)` 先让能力不可见，再等待既有 lease。pending/unknown 期间它可能持续等待，这是保护，不是强行杀掉任务的超时。操作进入终态后，尚未实际结束的 execute/verify/reconcile 回调仍持有插件租约；超时和 AbortSignal 不代表这些回调已退出。
+
+插件在异步 dispose 完成前持续处于 draining，其依赖提供者不能停止，也不能重新激活该插件。清理成功后才变为 stopped；清理失败进入 failed。
 
 先核对/终结任务，再停用。不要在 dispose 中发送紧急停机、自动补偿或撤销用户业务操作。
 
