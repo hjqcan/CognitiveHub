@@ -142,7 +142,7 @@ await migrate(pool);   // 幂等建表，表名前缀 cognitive_hub_
 const runtime = new IntentRuntime({ ...ports, journal: new PgJournal(pool), runs: new PgRunStore(pool) });
 ```
 
-离线测试用 PGlite（编译成 WebAssembly 的真 PostgreSQL）运行同一套一致性测试和验收链路。设置 `COGNITIVE_HUB_PG_URL` 并自行安装 `pg` 后，同一套测试会额外对真实服务器运行；CI 未接入真实服务器。
+离线测试用 PGlite（编译成 WebAssembly 的真 PostgreSQL）运行同一套一致性测试和验收链路。设置 `COGNITIVE_HUB_PG_URL` 并自行安装 `pg` 后，同一套测试会额外对真实服务器运行，连接串写进 `.env` 后也可用 `npm run test:pg`；CI 未接入真实服务器。
 
 ## 决策记录与只读回放（可选）
 

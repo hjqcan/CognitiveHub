@@ -25,6 +25,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test tests/*.test.mjs",
+    "test:pg": "npm run build && node --env-file=.env --test tests/*.test.mjs",
     "demo": "npm run build && node examples/robot-platform.mjs",
     "replay": "node scripts/replay.mjs",
     "check": "npm run typecheck && npm test"

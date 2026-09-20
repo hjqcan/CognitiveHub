@@ -15,7 +15,7 @@ d=$(mktemp -d) && node examples/restart-recovery.mjs "$d" submit && node example
 
 TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexedAccess、noUnusedLocals 和 noUnusedParameters。测试用 Node 原生 test runner，不需要 Jest/Vitest 或真实网络。
 
-开发依赖另有 PGlite 0.5.8：编译成 WebAssembly 的 PostgreSQL，用来离线运行 SQL 适配器的一致性测试，不进入运行时依赖。设置 `COGNITIVE_HUB_PG_URL` 并自行安装 `pg` 后，同一套测试会额外对真实服务器运行。
+开发依赖另有 PGlite 0.5.8：编译成 WebAssembly 的 PostgreSQL，用来离线运行 SQL 适配器的一致性测试，不进入运行时依赖。设置 `COGNITIVE_HUB_PG_URL` 并自行安装 `pg` 后，同一套测试会额外对真实服务器运行。把连接串写进 `.env`（见 `.env.example`）后可直接 `npm run test:pg`，它用 Node 自带的 `--env-file` 读取，不引入依赖；`migrate()` 会在目标库建 `cognitive_hub_*` 表，请指向一个专用测试库。
 
 ## 测试组织
 
