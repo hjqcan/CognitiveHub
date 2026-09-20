@@ -201,8 +201,11 @@ export class IntentRuntime {
       if (inflight.length) { await save({ status: 'waiting', wait: this.#waitFor(draft.run, inflight, now) }); return 'waiting'; }
       return this.#finish(draft, 'completed', { code: 'satisfied', reason: 'The goal evaluator confirmed the objective', evidence: goal.evidence });
     }
-    if (goal.status === 'unreachable')
+    if (goal.status === 'unreachable') {
+      // Failure ends scheduling too; accepted work must remain owned until it settles.
+      if (inflight.length) { await save({ status: 'waiting', wait: this.#waitFor(draft.run, inflight, now) }); return 'waiting'; }
       return this.#finish(draft, 'failed', { code: 'unreachable', reason: 'The goal evaluator judged the objective unreachable', evidence: goal.evidence });
+    }
     // 5. One action at a time.
     if (inflight.length) { await save({ status: 'waiting', wait: this.#waitFor(draft.run, inflight, now) }); return 'waiting'; }
     // 6. Budgets are checked before the decider is called.
@@ -237,36 +240,40 @@ export class IntentRuntime {
       this.#emit('run.deliberating', { runId: draft.run.id, requestId: proposal.request.id, kind: 'decision' });
       return 'deliberating';
     }
-    // 8. Approval gate: an approval names one action digest at one state version and is spent by use.
-    const { action } = proposal;
-    const digest = actionDigest(action);
-    if (draft.run.approval === 'each-action') {
-      const approved = draft.run.approved;
-      const valid = approved !== null && approved.digest === digest && approved.stateVersion === proposal.stateVersion && approved.expiresAt > now;
-      if (!valid) {
-        this.hub.discard(proposal.id);
-        if (approved) await save({ approved: null });
-        return this.#deliberate(draft, 'approval', 'Host approval is required before this action is dispatched',
-          { digest, stateVersion: proposal.stateVersion, capability: action.capability, description: action.description,
-            input: action.input, resources: action.resources }, proposal.stateVersion);
+    try {
+      // 8. Approval gate: an approval names one action digest at one state version and is spent by use.
+      const { action } = proposal;
+      const digest = actionDigest(action);
+      if (draft.run.approval === 'each-action') {
+        const approved = draft.run.approved;
+        const valid = approved !== null && approved.digest === digest && approved.stateVersion === proposal.stateVersion && approved.expiresAt > now;
+        if (!valid) {
+          if (approved) await save({ approved: null });
+          return this.#deliberate(draft, 'approval', 'Host approval is required before this action is dispatched',
+            { digest, stateVersion: proposal.stateVersion, capability: action.capability, description: action.description,
+              input: action.input, resources: action.resources }, proposal.stateVersion);
+        }
       }
+      // 9. Persist the operation before dispatch, so a crash in between is recovered by lookup, never by re-dispatch.
+      const operationId = `${draft.run.id}/${draft.run.counters.actions + 1}`;
+      const recordId = executionId(draft.run.intent, operationId);
+      await save({ operations: [...draft.run.operations, recordId], approved: null,
+        counters: { ...this.#count(draft.run.counters, canonical([observation.version, action.id])), actions: draft.run.counters.actions + 1 } });
+      const execution = await this.hub.execute(proposal.id, operationId, { live: true, ...hubSignal });
+      if (execution.kind === 'rejected') {
+        this.#emit('run.dispatch.rejected', { runId: draft.run.id, code: execution.code });
+        const c = draft.run.counters;
+        await save({ operations: draft.run.operations.filter(x => x !== recordId), counters: { ...c, noProgress: c.noProgress + 1 } });
+        return 'rejected';
+      }
+      ensure(execution.kind === 'record', 'invalid-execution', 'Live execution cannot return a preview');
+      if (terminal(execution.record.status)) return 'executed';
+      await save({ status: 'waiting', wait: this.#waitFor(draft.run, [recordId], now) });
+      return 'waiting';
+    } finally {
+      // The runtime owns this proposal; persisted executions are recovered from the journal.
+      this.hub.discard(proposal.id);
     }
-    // 9. Persist the operation before dispatch, so a crash in between is recovered by lookup, never by re-dispatch.
-    const operationId = `${draft.run.id}/${draft.run.counters.actions + 1}`;
-    const recordId = executionId(draft.run.intent, operationId);
-    await save({ operations: [...draft.run.operations, recordId], approved: null,
-      counters: { ...this.#count(draft.run.counters, canonical([observation.version, action.id])), actions: draft.run.counters.actions + 1 } });
-    const execution = await this.hub.execute(proposal.id, operationId, { live: true, ...hubSignal });
-    if (execution.kind === 'rejected') {
-      this.#emit('run.dispatch.rejected', { runId: draft.run.id, code: execution.code });
-      const c = draft.run.counters;
-      await save({ operations: draft.run.operations.filter(x => x !== recordId), counters: { ...c, noProgress: c.noProgress + 1 } });
-      return 'rejected';
-    }
-    ensure(execution.kind === 'record', 'invalid-execution', 'Live execution cannot return a preview');
-    if (terminal(execution.record.status)) return 'executed';
-    await save({ status: 'waiting', wait: this.#waitFor(draft.run, [recordId], now) });
-    return 'waiting';
   }
   #count(counters: Run['counters'], signature: string): Run['counters'] {
     return signature === counters.signature ? { ...counters, noProgress: counters.noProgress + 1 } : { ...counters, noProgress: 0, signature };

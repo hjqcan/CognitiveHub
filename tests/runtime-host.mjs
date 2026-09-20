@@ -69,6 +69,7 @@ export async function boot(platform, options = {}) {
     ...(options.journal ? { journal: options.journal } : {}), ...(options.runs ? { runs: options.runs } : {}),
     ...(options.owner ? { owner: options.owner } : {}), ...(options.leaseMs ? { leaseMs: options.leaseMs } : {}),
     ...(options.decisions ? { decisions: options.decisions } : {}),
+    ...(options.maxProposals ? { maxProposals: options.maxProposals } : {}),
   });
   return { runtime, host, inbox, events, clock, platform };
 }

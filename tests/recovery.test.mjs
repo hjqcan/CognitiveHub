@@ -8,6 +8,30 @@ const exported = journal => JSON.parse(JSON.stringify(journal.entries()));
 // A later process: new plugin host, new hub, journal rebuilt from exported JSON. The crashed one is simply abandoned.
 const restart = (f, options = {}) => fixture({ journal: new MemoryJournal(exported(f.journal)), ...options });
 
+test('structured execution fingerprints over 512 characters survive dispatch, retry and recovery', async () => {
+  let calls = 0, done = false;
+  const input = { robotId: 'R01', trajectory: Array.from({ length: 30 }, (_, i) => ({ x: i, y: i * 2, seconds: 0.2 })) };
+  const capability = {
+    prepare: async () => [{ key: 'recover-r01', description: 'Follow the bounded trajectory', input, resources: ['robot:R01'] }],
+    execute: async () => { calls++; return accepted; },
+    verify: async () => ({ status: done ? 'verified' : 'pending', evidence: { done } }),
+  };
+  const f = await fixture({ capability });
+  const proposal = await f.hub.propose(intent());
+  const submitted = await f.hub.execute(proposal.id, 'trajectory', { live: true });
+  assert.equal(submitted.kind, 'record', submitted.reason);
+  assert.equal(submitted.record.status, 'pending');
+  assert.ok(submitted.record.fingerprint.length > 512);
+  const g = await restart(f, { capability });
+  const retry = await g.hub.propose(intent());
+  assert.equal((await g.hub.execute(retry.id, 'trajectory', { live: true })).unchanged, true);
+  done = true;
+  assert.equal((await g.hub.reconcile(submitted.record.id)).record.status, 'verified');
+  assert.equal(calls, 1);
+  await f.hub.reconcile(submitted.record.id);
+  await f.plugins.stop('robot'); await g.plugins.stop('robot');
+});
+
 test('a restarted hub reconciles an accepted operation through a re-bound capability without re-executing', async () => {
   let calls = 0, done = false;
   const capability = {

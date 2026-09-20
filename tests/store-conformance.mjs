@@ -20,6 +20,18 @@ const settle = (r, status) => ({ ...r, revision: r.revision + 1, status, updated
   receipt: status === 'failed' ? { status: 'failed', reason: 'x', evidence: null } : { status: 'completed', evidence: null } });
 
 export function journalConformance(name, journal) {
+  test(`${name}: structured fingerprints are preserved without an identifier length limit`, async () => {
+    const j = await journal();
+    const fingerprint = JSON.stringify({ path: Array.from({ length: 100 }, (_, x) => ({ x, y: x * 2 })) });
+    assert.ok(fingerprint.length > 512);
+    const a = record({ fingerprint, resources: [unique('res')] });
+    assert.equal((await j.claim(a)).kind, 'claimed');
+    assert.equal((await j.claim(a)).kind, 'existing');
+    await j.replace(settle(a, 'failed'), 0);
+    assert.equal((await j.get(a.id)).fingerprint, fingerprint);
+    for (const invalid of ['', '   ', 42, null])
+      await assert.rejects(j.claim({ ...record(), fingerprint: invalid }), { code: 'invalid-record' });
+  });
   test(`${name}: claim reserves the operation id and its resources atomically`, async () => {
     const j = await journal(); const resource = unique('res');
     const a = record({ resources: [resource] });

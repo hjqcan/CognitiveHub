@@ -74,7 +74,10 @@ export function assertRecord(value: unknown): asserts value is ExecutionRecord {
   const record = jsonObject(value, 'invalid-record', 'Execution record');
   identifier(record.id as string, 'record id');
   identifier(record.operationId as string, 'operation id');
-  identifier(record.fingerprint as string, 'fingerprint');
+  // This is canonical JSON of the intent and bound action, not a short identifier.
+  // Legitimate structured inputs routinely exceed the identifier length limit.
+  ensure(typeof record.fingerprint === 'string' && record.fingerprint.trim().length > 0,
+    'invalid-record', 'Record fingerprint must be a nonempty string');
   ensure(typeof record.status === 'string' && STATUSES.includes(record.status), 'invalid-record', 'Unknown execution status');
   ensure(Number.isInteger(record.revision) && (record.revision as number) >= 0, 'invalid-record', 'Revision must be a non-negative integer');
   ensure(Number.isFinite(record.createdAt) && Number.isFinite(record.updatedAt), 'invalid-record', 'Record timestamps must be finite');

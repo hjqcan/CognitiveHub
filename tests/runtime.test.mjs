@@ -3,6 +3,37 @@ import assert from 'node:assert/strict';
 import { MemoryJournal, MemoryRunStore } from '../dist/index.js';
 import { boot, createPlatform, spec } from './runtime-host.mjs';
 
+test('managed steps release their proposals even before the TTL elapses', async () => {
+  const platform = createPlatform(); platform.info = 'given';
+  const { runtime, host } = await boot(platform, { maxProposals: 1 });
+  const run = await runtime.start(spec());
+  for (let stage = 0; stage < 3; stage++) {
+    assert.equal((await runtime.step(run.id)).outcome, 'waiting');
+    host.complete();
+  }
+  assert.equal((await runtime.step(run.id)).outcome, 'completed');
+  assert.equal(platform.submissions, 3);
+  await host.plugins.stop('sim');
+});
+
+test('an unreachable goal still settles accepted work before ending the run', async () => {
+  const platform = createPlatform();
+  let unreachable = false;
+  const { runtime, host } = await boot(platform, {
+    goal: { async evaluate() { return { status: unreachable ? 'unreachable' : 'unsatisfied', evidence: null }; } },
+  });
+  const run = await runtime.start(spec());
+  await runtime.step(run.id);
+  unreachable = true;
+  await runtime.deliver(run.id, { key: 'goal-changed', type: 'host', data: null });
+  assert.equal((await runtime.step(run.id)).outcome, 'waiting');
+  assert.equal(platform.submissions, 1);
+  host.complete();
+  assert.equal((await runtime.step(run.id)).outcome, 'failed');
+  assert.equal((await runtime.hub.journal.unsettled()).length, 0);
+  await host.plugins.stop('sim');
+});
+
 test('a run advances one action per step, asks for a missing fact, and completes on independent evidence', async () => {
   const platform = createPlatform();
   const { runtime, host, inbox, events } = await boot(platform);
