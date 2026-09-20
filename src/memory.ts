@@ -77,7 +77,14 @@ export class MemoryRunStore implements RunStore {
       ensure(!this.#runs.has(input.id), 'invalid-run', `Duplicate run ${input.id}`);
       this.#runs.set(input.id, immutable(input));
     }
-    for (const key of events) { identifier(key, 'event key'); this.#events.add(key); }
+    for (const key of events) {
+      identifier(key, 'event key'); this.#events.add(key);
+      const pair: unknown = JSON.parse(key);
+      ensure(Array.isArray(pair) && pair.length === 2 && pair.every(x => typeof x === 'string'), 'invalid-event', 'Invalid exported event key');
+      const run = this.#runs.get(pair[0] as string);
+      if (run && !(run.processedEvents ?? []).includes(pair[1] as string))
+        this.#runs.set(run.id, immutable({ ...run, processedEvents: [...(run.processedEvents ?? []), pair[1] as string] }));
+    }
   }
   async create(run: Run): Promise<void> {
     ensure(!this.#runs.has(run.id), 'run-exists', `Run ${run.id} already exists`);
