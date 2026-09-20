@@ -27,6 +27,7 @@ export class PluginHost {
   readonly #services = new Map<string, { owner: string; value: unknown }>();
   readonly #capabilities: CapabilityRegistration[] = [];
   #starting = false;
+  #activation = 0; // Never reused, including after uninstall/reinstall.
 
   install(plugin: Plugin, scope: Scope = []): void {
     ensure(!this.#starting, 'host-busy', 'Cannot install during activation');
@@ -88,7 +89,8 @@ export class PluginHost {
   }
 
   async #activate(mount: Mount, batch: ActivationBatch): Promise<void> {
-    mount.status = 'starting'; mount.activation++;
+    ensure(Number.isSafeInteger(this.#activation + 1), 'activation-limit', 'Plugin activation counter exhausted');
+    mount.status = 'starting'; mount.activation = ++this.#activation;
     const { manifest } = mount.plugin;
     let open = true;
     const registering = (): void => ensure(open, 'closed-context', 'Contributions must be registered during setup');
@@ -174,10 +176,11 @@ export class PluginHost {
     } };
   }
   /** Lease one specific activation, as bound by a proposal made in this process. */
-  acquire(pluginId: string, capabilityId: string, activation: number, scope: Scope): CapabilityLease {
+  acquire(pluginId: string, capabilityId: string, activation: number, scope: Scope, pluginVersion?: string): CapabilityLease {
     const mount = this.#mounts.get(pluginId);
     const registration = this.list(scope).find(r => r.pluginId === pluginId &&
-      r.capability.id === capabilityId && r.activation === activation);
+      r.capability.id === capabilityId && r.activation === activation &&
+      (pluginVersion === undefined || r.pluginVersion === pluginVersion));
     ensure(mount && registration, 'unavailable-capability', 'Capability was removed, replaced, or is outside scope');
     return this.#lease(mount, registration);
   }

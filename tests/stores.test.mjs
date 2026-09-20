@@ -22,7 +22,7 @@ decisionStoreConformance('PgDecisionStore (PGlite)', async () => new PgDecisionS
 test('the schema migration is idempotent and records every version', async () => {
   const db = await pglite(); await migrate(db);
   const { rows } = await db.query('SELECT version FROM cognitive_hub_schema ORDER BY version');
-  assert.deepEqual(rows.map(r => r.version), [1, 2]); assert.equal(SCHEMA_VERSION, 2);
+  assert.deepEqual(rows.map(r => r.version), Array.from({ length: SCHEMA_VERSION }, (_, i) => i + 1)); assert.equal(SCHEMA_VERSION, 3);
 });
 test('a lock collision leaves neither the record nor any of its other locks behind', async () => {
   const db = await pglite(); const journal = new PgJournal(db);

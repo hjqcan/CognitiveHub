@@ -152,7 +152,7 @@ export class CognitiveHub {
           for (const registration of this.#options.plugins.list(intent.scope)) {
             if (!intent.capabilities.includes(registration.capability.id)) { trace.notRequested.push(registration.capability.id); continue; }
             const lease = this.#options.plugins.acquire(registration.pluginId,
-              registration.capability.id, registration.activation, intent.scope);
+              registration.capability.id, registration.activation, intent.scope, registration.pluginVersion);
             leases.push(lease);
             const capability = lease.registration.capability;
             const drafts = await capability.prepare({ intent, observation, signal });
@@ -256,8 +256,10 @@ export class CognitiveHub {
   discard(proposalId: string): boolean { this.#consumed.delete(proposalId); return this.#proposals.delete(proposalId); }
 
   async execute(proposalId: string, operationId: string,
-    options: { live?: boolean; signal?: AbortSignal } = {}): Promise<ExecutionResult> {
+    options: { live?: boolean; signal?: AbortSignal; deadlineAt?: number } = {}): Promise<ExecutionResult> {
     identifier(operationId, 'operation id');
+    if (options.deadlineAt !== undefined)
+      ensure(Number.isFinite(options.deadlineAt), 'invalid-deadline', 'Dispatch deadline must be finite');
     const proposal = this.#proposals.get(proposalId);
     if (!proposal) return rejected('unknown-proposal', 'Unknown or discarded proposal');
     const { intent, action } = proposal;
@@ -279,7 +281,9 @@ export class CognitiveHub {
         ? { kind: 'record', record: existing, unchanged: true }
         : rejected('operation-mismatch', 'Operation ID already belongs to another action');
       ensure(proposal.expiresAt > this.#now(), 'stale-proposal', 'Proposal has expired');
-      lease = this.#options.plugins.acquire(action.pluginId, action.capability, action.activation, intent.scope);
+      const deadlineAt = Math.min(proposal.expiresAt, options.deadlineAt ?? Infinity);
+      ensure(deadlineAt > this.#now(), 'dispatch-expired', 'Dispatch authorization has expired');
+      lease = this.#options.plugins.acquire(action.pluginId, action.capability, action.activation, intent.scope, action.pluginVersion);
       const capability = lease.registration.capability;
       const context = await bounded(this.#executionTimeout, options.signal, signal => {
         preflight = (async (): Promise<ExecutionContext> => {
@@ -289,7 +293,8 @@ export class CognitiveHub {
         ensure(policy.allowed === true && policy.version === proposal.policyVersion,
           'policy-rejected', 'Authorization was denied or changed');
         capability.validate(action.input);
-        const ctx: ExecutionContext = Object.freeze({ intent, observation, action, operationId, idempotencyKey: id, signal });
+        const ctx: ExecutionContext = Object.freeze({ intent, observation, action, operationId, idempotencyKey: id, signal,
+          dispatchDeadlineAt: Math.min(deadlineAt, observation.validUntil) });
         ensure(await capability.check(ctx), 'precondition', 'Capability preconditions no longer hold');
         const finalPolicy = await this.#options.policy.check({ intent, observation, candidates: [action], action, phase: 'execute' }, signal);
         ensure(finalPolicy.allowed === true && finalPolicy.version === proposal.policyVersion,
@@ -297,6 +302,7 @@ export class CognitiveHub {
         signal.throwIfAborted();
         ensure(this.#options.plugins.status(action.pluginId) === 'active', 'capability-draining', 'Plugin is stopping');
         ensure(proposal.expiresAt > this.#now() && observation.validUntil > this.#now(), 'stale-proposal', 'Proposal expired in preflight');
+        ensure(ctx.dispatchDeadlineAt! > this.#now(), 'dispatch-expired', 'Dispatch authorization expired in preflight');
         return ctx;
         })();
         return preflight;
@@ -324,6 +330,7 @@ export class CognitiveHub {
       const rejection = options.signal?.aborted ? 'cancelled'
         : proposal.expiresAt <= now ? 'proposal-expired'
         : context.observation.validUntil <= now ? 'observation-expired'
+        : context.dispatchDeadlineAt! <= now ? 'dispatch-expired'
         : this.#options.plugins.status(action.pluginId) !== 'active' ? 'plugin-stopping' : null;
       if (rejection) {
         this.#emit('execution.dispatch.rejected', { id, code: rejection });
@@ -331,7 +338,12 @@ export class CognitiveHub {
       } else {
         try {
           receipt = this.#receipt(await this.#invoke(pending, 'execute', options.signal,
-            signal => capability.execute({ ...context, signal })));
+            signal => {
+              // Check at callback entry too: claim/audit hooks and queued microtasks can consume the remaining time.
+              if (context.dispatchDeadlineAt! <= this.#now())
+                return Promise.resolve<Receipt>({ status: 'failed', reason: 'dispatch-expired', evidence: null });
+              return capability.execute({ ...context, signal });
+            }));
         } catch {
           // Timeouts, malformed replies and lost connections may hide an actual effect.
           receipt = { status: 'unknown', reason: 'Executor outcome unavailable; reconcile before any new action' };
