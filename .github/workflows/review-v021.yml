@@ -1,0 +1,30 @@
+name: review-v021-validation
+on:
+  push:
+    branches: ['review/v0.2.1-fixes']
+permissions:
+  contents: write
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/review/v0.2.1-fixes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: review/v0.2.1-fixes
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Apply reviewed source changes
+        run: python3 .review-fixes.py
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run check
+      - run: npm run demo
+      - name: Save verified source tree on the validation branch only
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/contracts.ts src/hub.ts src/memory.ts src/pg.ts src/plugins.ts src/run.ts src/runtime.ts tests/stores.test.mjs
+          git commit -m 'fix: verify v0.2.1 correctness repairs'
+          git push origin HEAD:refs/heads/review/v0.2.1-fixes
