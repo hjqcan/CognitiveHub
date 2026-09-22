@@ -111,7 +111,12 @@ export class JevDecisionProvider implements DecisionProvider {
       ensure(Object.keys(probabilities).length === keys.length && keys.every(k => Object.hasOwn(probabilities, k)),
         'jev-schema', 'Jev distribution does not match the candidate set');
       const values = keys.map(k => probability(probabilities[k]));
-      ensure(Math.abs(values.reduce((a, b) => a + b, 0) - 1) <= 1e-4, 'jev-schema', 'Probabilities must sum to one');
+      const mass = values.reduce((a, b) => a + b, 0);
+      // The live API reports hundredth-precision values, sometimes totalling 0.99/1.01.
+      // Allow one rounding unit only for that observed format, not arbitrary scores.
+      const hundredths = values.every(value => Math.abs(value * 100 - Math.round(value * 100)) < 1e-8);
+      const tolerance = hundredths ? 0.01 + 1e-8 : 1e-4;
+      ensure(Math.abs(mass - 1) <= tolerance, 'jev-schema', `Probabilities must sum to one (received ${mass})`);
       ensure(probability(probabilities[chosen]) + 1e-8 >= Math.max(...values), 'jev-schema', 'Choice conflicts with distribution');
       const confidence = probability(answer.confidence);
       ensure(typeof result.model === 'string' && result.model.length > 0, 'jev-schema', 'Response model is required');
@@ -120,7 +125,8 @@ export class JevDecisionProvider implements DecisionProvider {
         ensure(typeof usage[key] === 'number' && Number.isInteger(usage[key]) && usage[key] >= 0,
           'jev-schema', 'Invalid token usage');
       const metadata: Json = { model: result.model, confidence,
-        probabilities: Object.fromEntries(keys.map(k => [k, probability(probabilities[k])])),
+        probabilities: Object.fromEntries(keys.map(k => [k, probability(probabilities[k]) / mass])),
+        reportedProbabilityMass: mass,
         usage: { inputTokens: usage.input_tokens as number, outputTokens: usage.output_tokens as number },
         latencyMs: performance.now() - started };
       if (chosen === 'wait') return { kind: 'wait', reason: 'Waiting for external progress', metadata };

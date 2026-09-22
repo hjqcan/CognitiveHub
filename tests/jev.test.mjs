@@ -27,6 +27,21 @@ test('Jev wait and ask remain non-executable decisions', async () => {
     assert.equal((await provider(r).decide(request, signal())).kind, kind);
   }
 });
+test('hundredth-precision live distributions allow one rounding unit and retain reported mass', async () => {
+  for (const tail of [0.09, 0.11]) {
+    const r = response(); r.answers.next.probabilities = { c0: 0.8, wait: 0.1, ask: tail };
+    const result = await provider(r).decide(request, signal());
+    assert.equal(result.candidateId, 'fully-bound-1');
+    assert.ok(Math.abs(result.metadata.reportedProbabilityMass - (0.9 + tail)) < 1e-8);
+    assert.ok(Math.abs(Object.values(result.metadata.probabilities).reduce((a, b) => a + b, 0) - 1) < 1e-8);
+  }
+});
+test('rounding tolerance does not accept arbitrary precision or a materially incomplete distribution', async () => {
+  for (const probabilities of [{ c0: 0.8001, wait: 0.1, ask: 0.09 }, { c0: 0.75, wait: 0.1, ask: 0.1 }]) {
+    const r = response(); r.answers.next.probabilities = probabilities;
+    await assert.rejects(provider(r).decide(request, signal()), { code: 'jev-schema' });
+  }
+});
 for (const [name, mutate] of [
   ['unknown choice', r => { r.answers.next.choice = 'shell'; }],
   ['missing distribution option', r => { delete r.answers.next.probabilities.ask; }],

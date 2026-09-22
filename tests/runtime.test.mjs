@@ -3,6 +3,27 @@ import assert from 'node:assert/strict';
 import { MemoryJournal, MemoryRunStore } from '../dist/index.js';
 import { boot, createPlatform, spec } from './runtime-host.mjs';
 
+test('a managed run completes with browser HTTP crypto, without randomUUID', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  const getRandomValues = crypto.getRandomValues.bind(crypto);
+  Object.defineProperty(globalThis, 'crypto', { configurable: true, value: { getRandomValues } });
+  try {
+    const platform = createPlatform(); platform.info = 'given';
+    const { runtime, host } = await boot(platform);
+    const run = await runtime.start(spec());
+    assert.match(run.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    for (let stage = 0; stage < 3; stage++) {
+      assert.equal((await runtime.step(run.id)).outcome, 'waiting');
+      host.complete();
+    }
+    assert.equal((await runtime.step(run.id)).outcome, 'completed');
+    assert.equal(platform.submissions, 3);
+    await host.plugins.stop('sim');
+  } finally {
+    Object.defineProperty(globalThis, 'crypto', descriptor);
+  }
+});
+
 test('managed steps release their proposals even before the TTL elapses', async () => {
   const platform = createPlatform(); platform.info = 'given';
   const { runtime, host } = await boot(platform, { maxProposals: 1 });

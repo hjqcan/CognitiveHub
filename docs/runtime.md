@@ -35,7 +35,7 @@ Run 只持久化可恢复的状态。observing、deciding、executing 只是 `st
 active ──→ waiting        模型 wait，或派发后记录未终态
 active ──→ deliberating   无候选 / 模型 ask / 预算耗尽 / 无进展 / 恢复受阻 / 需要批准
 active ──→ completed      GoalEvaluator satisfied 且没有在途操作
-active ──→ failed         GoalEvaluator unreachable
+active ──→ failed         GoalEvaluator unreachable 且没有在途操作
 waiting ──→ active        任一等待条件成立（step 自查，或 deliver 唤醒）
 deliberating ──→ active   有效回应被应用；terminate 回应 → stopping / stopped
 {active, waiting, deliberating} ──→ paused ──→ active / deliberating
@@ -52,12 +52,12 @@ deliberating ──→ active   有效回应被应用；terminate 回应 → sto
 2. `stopping` 的 Run 只做第 1 步；全部终态后变为 `stopped`。
 3. 观察一次状态。
 4. `waiting` 的 Run 检查等待条件：没有任何条件成立就直接返回 `waiting`，**不调用决策器**。只被时间条件唤醒且状态版本没变，`noProgress + 1`。
-5. 调用 `GoalEvaluator`。第一步就检查，所以“目标本来就已满足”不会产生任何动作。satisfied 但有在途操作 → 继续等待，不带着未知结果进入 completed。unreachable → `failed`。
+5. 调用 `GoalEvaluator`。第一步就检查，所以“目标本来就已满足”不会产生任何动作。satisfied / unreachable 但有在途操作 → 继续等待，不带着未知结果进入终态；全部核对后根据当前证据进入 completed / failed。
 6. 有在途操作 → `waiting`。一次只有一个动作。
 7. 预算检查：截止时间、决策次数、动作次数、无进展次数，任一耗尽 → `deliberating`（kind `budget` / `no-progress`）。
 8. `hub.propose()`。wait → 登记 `state` + `time` 条件；deliberation → `deliberating`（kind `decision`）。`idle: 'wait'` 的 Run 在没有任何授权候选时也走 wait 路径，不调用决策器、不产生请示。
 9. `each-action` 模式下核对批准（见 §5）。
-10. 先把 operationId 与 `actions + 1` 写入 Run，再 `hub.execute(..., { live: true })`。派发被拒绝（撤权、状态变化、资源占用）→ 从 `operations` 移除，`noProgress + 1`，返回 `rejected`。记录未终态 → `waiting`；已终态 → `executed`。
+10. 先把 operationId 与 `actions + 1` 写入 Run，再 `hub.execute(..., { live: true })`。派发被拒绝（撤权、状态变化、资源占用）→ 从 `operations` 移除，`noProgress + 1`，返回 `rejected`。记录未终态 → `waiting`；已终态 → `executed`。运行时在 finally 中释放自己创建的提案，包括被拒绝、请求批准和异常路径；执行恢复依靠 journal，不依赖提案继续驻留。
 
 `StepResult.outcome` 取值：`idle`（终态或 paused）、`lease-held`、`waiting`、`executed`、`rejected`、`deliberating`、`completed`、`failed`、`stopped`。
 
@@ -136,3 +136,7 @@ type WaitCondition =
 - 一个 Run 同一时刻只由一个 worker 推进；跨进程互斥依赖租约与 CAS，不是队列。
 - 终止不等于回滚；没有 cancel 端口。
 - 内存存储不持久；持久化用 `./pg` 适配器，它同样不提供队列或公平调度。
+
+## 消费端验证
+
+两个独立游戏的 v0.2 接入、发现的核心问题、验证边界和使用评价见 [游戏接入报告](game-integration-v0.2.md)。
