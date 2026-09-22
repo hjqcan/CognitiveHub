@@ -1,7 +1,7 @@
 import type {
   Capability, CapabilityRegistration, Dispose, Plugin, PluginContext, Scope,
 } from './contracts.js';
-import { ensure, identifier, immutable, validScope, visible } from './primitives.js';
+import { ensure, HubError, identifier, immutable, validScope, visible } from './primitives.js';
 
 type Status = 'installed' | 'starting' | 'active' | 'draining' | 'stopped' | 'failed';
 interface Mount {
@@ -11,7 +11,10 @@ interface Mount {
   activation: number;
   leases: number;
   disposers: Dispose[];
-  drained?: () => void;
+  /** Wakers for stop() calls waiting on the last lease; a stop that gave up removes its own. */
+  drained: Set<() => void>;
+  /** The one disposal shared by every stop() call that saw the drain finish. */
+  disposal?: Promise<void> | undefined;
 }
 interface ActivationBatch {
   readonly started: Mount[];
@@ -39,7 +42,7 @@ export class PluginHost {
     ensure(new Set(manifest.provides).size === (manifest.provides?.length ?? 0), 'duplicate-service', 'Duplicate provides');
     this.#mounts.set(manifest.id, {
       plugin: { manifest, setup: ctx => plugin.setup(ctx) }, scope: immutable(scope),
-      status: 'installed', activation: 0, leases: 0, disposers: [],
+      status: 'installed', activation: 0, leases: 0, disposers: [], drained: new Set(),
     });
   }
 
@@ -170,7 +173,7 @@ export class PluginHost {
     return { registration, release: () => {
       if (released) return;
       released = true; mount.leases--;
-      if (mount.leases === 0) mount.drained?.();
+      if (mount.leases === 0) { for (const wake of mount.drained) wake(); mount.drained.clear(); }
     } };
   }
   /** Lease one specific activation, as bound by a proposal made in this process. */
@@ -196,20 +199,41 @@ export class PluginHost {
   }
   status(id: string): Status | undefined { return this.#mounts.get(id)?.status; }
 
-  /** Hide new capabilities first, then drain existing leases. No implicit action cancellation. */
-  async stop(id: string): Promise<void> {
+  /**
+   * Hide new capabilities first, then drain existing leases. No implicit action cancellation.
+   * An aborted signal gives up the wait with `drain-aborted`: the plugin stays draining (still hidden, leases still
+   * counted) and a later stop() resumes waiting. Nothing running is killed either way.
+   */
+  async stop(id: string, options: { readonly signal?: AbortSignal } = {}): Promise<void> {
     ensure(!this.#starting, 'host-busy', 'Cannot stop during activation');
     const mount = this.#mounts.get(id);
-    ensure(mount?.status === 'active', 'plugin-state', 'Only active plugins can be stopped');
-    const provided = new Set(mount.plugin.manifest.provides ?? []);
-    const dependent = [...this.#mounts.values()].find(m => m !== mount &&
-      ['active', 'draining', 'starting'].includes(m.status) &&
-      (m.plugin.manifest.requires ?? []).some(key => provided.has(key)));
-    ensure(!dependent, 'active-dependent', `Stop dependent ${dependent?.plugin.manifest.id ?? ''} first`);
-    mount.status = 'draining';
-    if (mount.leases > 0) await new Promise<void>(resolve => { mount.drained = resolve; });
-    try { await this.#dispose(mount); mount.status = 'stopped'; }
-    catch (e) { mount.status = 'failed'; throw e; }
+    ensure(mount?.status === 'active' || mount?.status === 'draining', 'plugin-state', 'Only active or draining plugins can be stopped');
+    if (mount.status === 'active') {
+      const provided = new Set(mount.plugin.manifest.provides ?? []);
+      const dependent = [...this.#mounts.values()].find(m => m !== mount &&
+        ['active', 'draining', 'starting'].includes(m.status) &&
+        (m.plugin.manifest.requires ?? []).some(key => provided.has(key)));
+      ensure(!dependent, 'active-dependent', `Stop dependent ${dependent?.plugin.manifest.id ?? ''} first`);
+      mount.status = 'draining';
+    }
+    if (mount.leases > 0) await this.#drained(mount, options.signal);
+    // Several callers may have waited on the same drain; the mount is disposed once.
+    mount.disposal ??= this.#dispose(mount)
+      .then(() => { mount.status = 'stopped'; }, (e: unknown) => { mount.status = 'failed'; throw e; })
+      .finally(() => { mount.disposal = undefined; });
+    await mount.disposal;
+  }
+  #drained(mount: Mount, signal: AbortSignal | undefined): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        mount.drained.delete(wake);
+        reject(new HubError('drain-aborted', `Plugin ${mount.plugin.manifest.id} still holds ${mount.leases} lease(s); it stays draining`));
+      };
+      const wake = () => { signal?.removeEventListener('abort', abort); resolve(); };
+      if (signal?.aborted) { abort(); return; }
+      mount.drained.add(wake);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
   }
   async #dispose(mount: Mount): Promise<void> {
     const errors: unknown[] = [];

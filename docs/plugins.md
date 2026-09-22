@@ -70,7 +70,7 @@ setup 结束后贡献窗口关闭。不要保留 ctx 在后台异步注册能力
 
 ## 排空与版本更新
 
-`stop(pluginId)` 先让能力不可见，再等待既有 lease。pending/unknown 期间它可能持续等待，这是保护，不是强行杀掉任务的超时。操作进入终态后，尚未实际结束的 execute/verify/reconcile 回调仍持有插件租约；超时和 AbortSignal 不代表这些回调已退出。恢复时采纳的旧记录同样持有租约，直到它进入终态且回调退出；绑定失败则不取租约。
+`stop(pluginId)` 先让能力不可见，再等待既有 lease。pending/unknown 期间它可能持续等待，这是保护，不是强行杀掉任务的超时。`stop(pluginId, { signal })` 可以放弃等待：signal 中止时以 `drain-aborted` 拒绝，模块保持 draining（能力仍不可见、租约照常计数），之后再次调用 `stop` 继续等待；它同样不会杀掉任何回调。操作进入终态后，尚未实际结束的 execute/verify/reconcile 回调仍持有插件租约；超时和 AbortSignal 不代表这些回调已退出。恢复时采纳的旧记录同样持有租约，直到它进入终态且回调退出；绑定失败则不取租约。
 
 插件在异步 dispose 完成前持续处于 draining，其依赖提供者不能停止，也不能重新激活该插件。清理成功后才变为 stopped；清理失败进入 failed。`start()` 不会重试 failed 模块；用 `uninstall(pluginId)` 移除 installed/stopped/failed 的挂载后重新 install，才是显式的重试或替换路径。active/draining 的模块不能卸载。
 

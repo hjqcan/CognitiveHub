@@ -206,3 +206,25 @@ test('rebind leases the active activation of an exact plugin version', async () 
   assert.throws(() => f.plugins.rebind('robot', '1.0.0', id, scope), { code: 'unavailable-capability' });
   lease.release(); await stop; assert.equal(stopped, true);
 });
+
+test('stop can give up waiting for leases on a signal and resume later', async () => {
+  const f = await fixture(), host = new PluginHost();
+  host.install(plugin('provider', ctx => { ctx.capability(f.capability); }));
+  await host.start();
+  const registration = host.list(intent().scope)[0];
+  const lease = host.acquire('provider', f.capability.id, registration.activation, intent().scope);
+  const controller = new AbortController();
+  const stop = host.stop('provider', { signal: controller.signal });
+  await tick(); assert.equal(host.status('provider'), 'draining');
+  controller.abort();
+  await assert.rejects(stop, { code: 'drain-aborted' });
+  assert.equal(host.status('provider'), 'draining', 'giving up does not reactivate or kill anything');
+  assert.equal(host.list(intent().scope).length, 0);
+  assert.throws(() => host.acquire('provider', f.capability.id, registration.activation, intent().scope), { code: 'unavailable-capability' });
+  await assert.rejects(host.stop('provider', { signal: AbortSignal.abort() }), { code: 'drain-aborted' });
+  const resumed = host.stop('provider'); const twice = host.stop('provider');
+  await tick(); lease.release();
+  await resumed; await twice;
+  assert.equal(host.status('provider'), 'stopped');
+  host.uninstall('provider');
+});

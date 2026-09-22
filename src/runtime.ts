@@ -107,9 +107,11 @@ export class IntentRuntime {
     if (spec.guidance !== undefined) assertGuidance(spec.guidance);
     const waitMs = spec.waitMs ?? this.#waitMs;
     ensure(Number.isInteger(waitMs) && waitMs > 0, 'invalid-run', 'waitMs must be a positive integer');
+    const idle = spec.idle ?? 'deliberate';
+    ensure(idle === 'deliberate' || idle === 'wait', 'invalid-run', 'idle must be deliberate or wait');
     const now = this.#now();
     const run: Run = immutable({
-      id: newId(), revision: 0, intent, guidance: spec.guidance ?? null, budget: this.#budget(spec.budget), approval: spec.approval, waitMs,
+      id: newId(), revision: 0, intent, guidance: spec.guidance ?? null, budget: this.#budget(spec.budget), approval: spec.approval, waitMs, idle,
       status: 'active', operations: [], wait: [], request: null, approved: null, answers: [],
       counters: { decisions: 0, actions: 0, noProgress: 0, signature: null }, progress: null, outcome: null, lease: null,
       createdAt: now, updatedAt: now,
@@ -225,7 +227,9 @@ export class IntentRuntime {
     let proposal: ProposalResult;
     try {
       proposal = await this.hub.propose(draft.run.intent,
-        { ...hubSignal, ...(draft.run.guidance ? { guidance: draft.run.guidance } : {}), tags: { runId: draft.run.id } });
+        { ...hubSignal, ...(draft.run.guidance ? { guidance: draft.run.guidance } : {}), tags: { runId: draft.run.id },
+          // An idle run treats an empty candidate set as "nothing to do yet" and waits for the state to change.
+          ...(draft.run.idle === 'wait' ? { onEmpty: 'wait' as const } : {}) });
     }
     finally { this.#stepping.delete(key); }
     if (proposal.kind === 'wait') {

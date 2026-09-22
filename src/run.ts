@@ -21,6 +21,12 @@ export interface Budget {
   readonly deadlineAt: number | null;
 }
 export type ApprovalMode = 'automatic' | 'each-action';
+/**
+ * What a step does when no capability offers a candidate. `deliberate` (default) asks the host, which is right when
+ * an empty set means a missing plugin or authorization. `wait` registers a state + time wait instead, for runs that
+ * legitimately have nothing to do until the world changes (a reviewer with an empty queue, a market maker before the open).
+ */
+export type IdleMode = 'deliberate' | 'wait';
 export interface RunSpec {
   readonly intent: Intent;
   readonly budget: Budget;
@@ -28,6 +34,7 @@ export interface RunSpec {
   readonly approval: ApprovalMode;
   readonly guidance?: Guidance;
   readonly waitMs?: number;
+  readonly idle?: IdleMode;
 }
 export interface Run {
   readonly id: string;
@@ -38,6 +45,8 @@ export interface Run {
   readonly budget: Budget;
   readonly approval: ApprovalMode;
   readonly waitMs: number;
+  /** Runs persisted before this field existed read as `deliberate`. */
+  readonly idle: IdleMode;
   readonly status: RunStatus;
   /** Journal record ids of every operation this run dispatched, in order. Open ones are found in the journal, not here. */
   readonly operations: readonly string[];

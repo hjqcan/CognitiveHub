@@ -21,7 +21,7 @@ for (const id of await runtime.due()) await runtime.step(id);
 
 | 对象 | 内容 |
 | --- | --- |
-| `RunSpec` | `intent`、`budget`、`approval`（必填：`automatic` 或 `each-action`）、可选 `guidance`、`waitMs` |
+| `RunSpec` | `intent`、`budget`、`approval`（必填：`automatic` 或 `each-action`）、可选 `guidance`、`waitMs`、`idle`（空候选时 `deliberate` 请示或 `wait` 等待，默认 `deliberate`） |
 | `Run` | 意图快照、guidance、预算、状态、`operations`（派发过的 journal 记录 id）、`wait`、当前 `request`、`approved`、`answers`、`counters`、`progress`、`outcome`、`lease`、CAS 用的 `revision` |
 | `Budget` | `maxDecisions`、`maxActions`、`maxNoProgress`、`deadlineAt` |
 | `Guidance` | 带版本的人类判断标准：`criteria`、`escalate`、`author`。只作为数据进入 `DecisionRequest.guidance`，Jev 适配器放进 `state.guidance`。**它不是 `Policy`**：不能放宽授权，也不能替代它 |
@@ -55,7 +55,7 @@ deliberating ──→ active   有效回应被应用；terminate 回应 → sto
 5. 调用 `GoalEvaluator`。第一步就检查，所以“目标本来就已满足”不会产生任何动作。satisfied 但有在途操作 → 继续等待，不带着未知结果进入 completed。unreachable → `failed`。
 6. 有在途操作 → `waiting`。一次只有一个动作。
 7. 预算检查：截止时间、决策次数、动作次数、无进展次数，任一耗尽 → `deliberating`（kind `budget` / `no-progress`）。
-8. `hub.propose()`。wait → 登记 `state` + `time` 条件；deliberation → `deliberating`（kind `decision`）。
+8. `hub.propose()`。wait → 登记 `state` + `time` 条件；deliberation → `deliberating`（kind `decision`）。`idle: 'wait'` 的 Run 在没有任何授权候选时也走 wait 路径，不调用决策器、不产生请示。
 9. `each-action` 模式下核对批准（见 §5）。
 10. 先把 operationId 与 `actions + 1` 写入 Run，再 `hub.execute(..., { live: true })`。派发被拒绝（撤权、状态变化、资源占用）→ 从 `operations` 移除，`noProgress + 1`，返回 `rejected`。记录未终态 → `waiting`；已终态 → `executed`。
 
@@ -72,6 +72,8 @@ type WaitCondition =
 ```
 
 运行时总会加一个 `time` 上界（`waitMs`），所以没有开放式等待。模型的 `wait` 决定被翻译成 `[state: 当前版本, time: now + waitMs]`；Choice 协议不需要表达结构化条件，等待需求来自模型，唤醒条件由运行时登记。
+
+没有候选不一定是阻塞。默认下空候选进入 `deliberating`（缺插件、被撤权时宿主应当知道）；长期存在、只在世界出现事情时才行动的 Run（审核队列为空的审核员、开盘前的做市商）用 `idle: 'wait'` 启动，空候选被翻译成同样的 `[state, time]` 等待：不调用决策器，不产生请示，但仍写一条 `outcome: 'wait'`、`decision: null` 的决策记录并计入 `decisions`；状态版本不变的定时唤醒照常累计 `noProgress`。直接使用 Hub 时对应 `propose(intent, { onEmpty: 'wait' })`。
 
 `deliver(runId, event)` 按 `event.key` 去重；`state-changed`、`execution-updated`（`data.recordId`）、`timer` 分别匹配对应条件，`host` 无条件唤醒。唤醒只把 `waiting` 改成 `active`，从不执行 step。宿主没有事件源时，定期对 `due()` 返回的 Run 调用 `step()` 也能工作，因为 step 自己会重新检查条件。
 

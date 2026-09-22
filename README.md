@@ -114,7 +114,7 @@ if (proposal.kind === 'proposal') {
 
 ## 托管运行时（可选）
 
-宿主也可以交付一个完整目标，让运行时持续推进。它不在后台循环：宿主在事件到达或 `due()` 到期时调用 `step()`，每次至多派发一个动作；目标完成必须由 `GoalEvaluator` 用宿主证据确认。完整说明见 [托管运行时](docs/runtime.md)。
+宿主也可以交付一个完整目标，让运行时持续推进。它不在后台循环：宿主在事件到达或 `due()` 到期时调用 `step()`，每次至多派发一个动作；目标完成必须由 `GoalEvaluator` 用宿主证据确认。只在世界出现事情时才需要行动的 Run 可以用 `idle: 'wait'` 启动：没有候选时等待状态变化，而不是请示。完整说明见 [托管运行时](docs/runtime.md)。
 
 ```ts
 import { IntentRuntime, HumanInbox } from '@cognitive-hub/core';

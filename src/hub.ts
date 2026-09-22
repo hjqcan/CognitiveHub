@@ -121,10 +121,14 @@ export class CognitiveHub {
     return { kind: 'deliberation', request };
   }
 
-  async propose(input: Intent, options: { signal?: AbortSignal; guidance?: Guidance; tags?: Tags } = {}): Promise<ProposalResult> {
+  async propose(input: Intent, options: { signal?: AbortSignal; guidance?: Guidance; tags?: Tags;
+    /** With no authorized, applicable candidate: ask for deliberation (default) or return a wait without calling the decider. */
+    onEmpty?: 'deliberate' | 'wait' } = {}): Promise<ProposalResult> {
     const intent = this.#intent(input);
     const guidance = options.guidance;
     if (guidance !== undefined) assertGuidance(guidance);
+    const onEmpty = options.onEmpty ?? 'deliberate';
+    ensure(onEmpty === 'deliberate' || onEmpty === 'wait', 'invalid-options', 'onEmpty must be deliberate or wait');
     const tags = immutable(options.tags ?? {});
     assertJson(tags as unknown);
     for (const [key, value] of Object.entries(tags)) {
@@ -192,7 +196,11 @@ export class CognitiveHub {
             }
             candidates.push(action); policyVersions.set(action.id, policy.version);
           }
-          if (!candidates.length) return { kind: 'deliberate' as const, reason: 'No authorized, applicable capability candidates' };
+          if (!candidates.length) {
+            const reason = 'No authorized, applicable capability candidates';
+            // Recorded either way (decision null, considered/excluded kept); no decider is consulted on an empty set.
+            return onEmpty === 'wait' ? { kind: 'wait' as const, reason } : { kind: 'deliberate' as const, reason };
+          }
           const request: DecisionRequest = immutable({ intent, observation, candidates, ...(guidance ? { guidance } : {}) });
           trace.request = request;
           const decision = immutable(await this.#options.decision.decide(request, signal));
