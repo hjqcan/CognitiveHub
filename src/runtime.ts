@@ -1,4 +1,4 @@
-import type { ExecutionRecord, Guidance, Intent, Json, Observation, ProposalResult } from './contracts.js';
+import type { DeliberationRequest, ExecutionRecord, Guidance, Intent, Json, Observation, ProposalResult } from './contracts.js';
 import type {
   Budget, DeliberationResponse, GoalEvaluator, RequestKind, Run, RunEvent, RunResult, RunSpec, RunStore, StepOutcome, StepResult, WaitCondition,
 } from './run.js';
@@ -23,6 +23,7 @@ interface Draft { run: Run }
 const field = (value: Json | undefined, key: string): Json | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as { readonly [key: string]: Json })[key] : undefined;
 const intentKey = (intent: Intent): string => canonical([intent.scope, intent.id]);
+const stopping = (run: Run): boolean => run.stopRequested === true || run.status === 'stopping';
 const rejected = (code: string, reason: string): RunResult => ({ kind: 'rejected', code, reason });
 
 /**
@@ -54,10 +55,11 @@ export class IntentRuntime {
       ensure(Number.isInteger(n) && n > 0, 'invalid-options', 'Runtime limits must be positive integers');
     this.runs = options.runs ?? new MemoryRunStore();
     const host = options.deliberation;
-    // Requests raised inside hub.propose() are tagged with the run being stepped, so the host knows what to answer.
+    // Managed requests are returned by propose(), then persisted with their Run before delivery.
+    // Direct users of runtime.hub retain the single-turn provider behavior.
     this.hub = new CognitiveHub({ ...options, deliberation: { request: async request => {
       const runId = this.#stepping.get(intentKey(request.intent));
-      await host.request(runId === undefined ? request : immutable({ ...request, runId, kind: 'decision', subject: null }));
+      if (runId === undefined) await host.request(request);
     } } });
   }
   get observerErrors(): number { return this.#observerErrors; }
@@ -112,7 +114,8 @@ export class IntentRuntime {
     const now = this.#now();
     const run: Run = immutable({
       id: newId(), revision: 0, intent, guidance: spec.guidance ?? null, budget: this.#budget(spec.budget), approval: spec.approval, waitMs, idle,
-      status: 'active', operations: [], wait: [], request: null, approved: null, answers: [],
+      status: 'active', stopRequested: false, processedEvents: [], outbox: null,
+      operations: [], wait: [], request: null, approved: null, answers: [],
       counters: { decisions: 0, actions: 0, noProgress: 0, signature: null }, progress: null, outcome: null, lease: null,
       createdAt: now, updatedAt: now,
     });
@@ -125,7 +128,8 @@ export class IntentRuntime {
   async due(now = this.#now()): Promise<readonly string[]> {
     const runs = await this.runs.unsettled();
     return runs.filter(r => r.status === 'active' || r.status === 'stopping' ||
-      (r.status === 'waiting' && r.wait.some(c => c.kind === 'time' && now >= c.at))).map(r => r.id);
+      (r.status === 'waiting' && r.wait.some(c => c.kind === 'time' && now >= c.at)) ||
+      (r.status === 'deliberating' && r.outbox && !r.outbox.delivered && now >= r.outbox.retryAt)).map(r => r.id);
   }
 
   /** One bounded advance. Returns what the step ended with; the host decides when to call again. */
@@ -133,7 +137,6 @@ export class IntentRuntime {
     return this.#serial(id, async () => {
       let run = await this.#load(id);
       if (runTerminal(run.status) || run.status === 'paused') return { run, outcome: 'idle' };
-      if (run.status === 'deliberating') return { run, outcome: 'deliberating' };
       const now = this.#now();
       if (run.lease && run.lease.owner !== this.#owner && run.lease.expiresAt > now) return { run, outcome: 'lease-held' };
       try { run = await this.#save(run, { lease: { owner: this.#owner, expiresAt: now + this.#leaseMs } }); }
@@ -158,6 +161,10 @@ export class IntentRuntime {
     const save = async (patch: Partial<Run>): Promise<Run> => (draft.run = await this.#save(draft.run, patch));
     const now = this.#now();
     const hubSignal = signal ? { signal } : {};
+    if (draft.run.status === 'deliberating') {
+      await this.#flushOutbox(draft);
+      return 'deliberating';
+    }
     // 1. Reconcile what an earlier step or process left open. Query only; never re-dispatch.
     const records = new Map<string, ExecutionRecord>();
     for (const recordId of draft.run.operations) {
@@ -174,7 +181,7 @@ export class IntentRuntime {
     }
     if (records.size !== draft.run.operations.length) await save({ operations: [...records.keys()] });
     const inflight = [...records.values()].filter(r => !terminal(r.status)).map(r => r.id);
-    if (draft.run.status === 'stopping') {
+    if (stopping(draft.run)) {
       if (inflight.length) { await save({ wait: this.#waitFor(draft.run, inflight, now) }); return 'waiting'; }
       return this.#finish(draft, 'stopped', draft.run.outcome ?? { code: 'stopped', reason: 'Stopped by host', evidence: null });
     }
@@ -212,7 +219,7 @@ export class IntentRuntime {
     if (inflight.length) { await save({ status: 'waiting', wait: this.#waitFor(draft.run, inflight, now) }); return 'waiting'; }
     // 6. Budgets are checked before the decider is called.
     const { budget, counters } = draft.run;
-    if (budget.deadlineAt !== null && now >= budget.deadlineAt)
+    if (budget.deadlineAt !== null && this.#now() >= budget.deadlineAt)
       return this.#deliberate(draft, 'budget', 'The run deadline has passed', { deadlineAt: budget.deadlineAt }, observation.version);
     if (counters.decisions >= budget.maxDecisions)
       return this.#deliberate(draft, 'budget', 'The decision budget is exhausted', { decisions: counters.decisions }, observation.version);
@@ -239,18 +246,19 @@ export class IntentRuntime {
       return 'waiting';
     }
     if (proposal.kind === 'deliberation') {
-      await save({ status: 'deliberating', request: { id: proposal.request.id, kind: 'decision', subject: null },
-        wait: [{ kind: 'deliberation', requestId: proposal.request.id }] });
-      this.#emit('run.deliberating', { runId: draft.run.id, requestId: proposal.request.id, kind: 'decision' });
-      return 'deliberating';
+      return this.#parkRequest(draft, 'decision', immutable({ ...proposal.request,
+        runId: draft.run.id, kind: 'decision', subject: null }));
     }
     try {
+      // Recheck the Run deadline after every slow decision; hub.execute enforces it again after preflight/claim.
+      if (budget.deadlineAt !== null && this.#now() >= budget.deadlineAt)
+        return this.#deliberate(draft, 'budget', 'The run deadline has passed', { deadlineAt: budget.deadlineAt }, proposal.stateVersion);
       // 8. Approval gate: an approval names one action digest at one state version and is spent by use.
       const { action } = proposal;
       const digest = actionDigest(action);
       if (draft.run.approval === 'each-action') {
         const approved = draft.run.approved;
-        const valid = approved !== null && approved.digest === digest && approved.stateVersion === proposal.stateVersion && approved.expiresAt > now;
+        const valid = approved !== null && approved.digest === digest && approved.stateVersion === proposal.stateVersion && approved.expiresAt > this.#now();
         if (!valid) {
           if (approved) await save({ approved: null });
           return this.#deliberate(draft, 'approval', 'Host approval is required before this action is dispatched',
@@ -258,12 +266,15 @@ export class IntentRuntime {
               input: action.input, resources: action.resources }, proposal.stateVersion);
         }
       }
+      const deadlineAt = Math.min(budget.deadlineAt ?? Infinity,
+        draft.run.approval === 'each-action' ? draft.run.approved!.expiresAt : Infinity);
       // 9. Persist the operation before dispatch, so a crash in between is recovered by lookup, never by re-dispatch.
       const operationId = `${draft.run.id}/${draft.run.counters.actions + 1}`;
       const recordId = executionId(draft.run.intent, operationId);
       await save({ operations: [...draft.run.operations, recordId], approved: null,
         counters: { ...this.#count(draft.run.counters, canonical([observation.version, action.id])), actions: draft.run.counters.actions + 1 } });
-      const execution = await this.hub.execute(proposal.id, operationId, { live: true, ...hubSignal });
+      const execution = await this.hub.execute(proposal.id, operationId, { live: true, ...hubSignal,
+        ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}) });
       if (execution.kind === 'rejected') {
         this.#emit('run.dispatch.rejected', { runId: draft.run.id, code: execution.code });
         const c = draft.run.counters;
@@ -294,18 +305,35 @@ export class IntentRuntime {
     return observation;
   }
   async #finish(draft: Draft, status: 'completed' | 'failed' | 'stopped', outcome: NonNullable<Run['outcome']>): Promise<StepOutcome> {
-    draft.run = await this.#save(draft.run, { status, wait: [], request: null, approved: null, outcome, lease: null });
+    draft.run = await this.#save(draft.run, { status, wait: [], request: null, outbox: null, approved: null, outcome, lease: null });
     this.#emit(`run.${status}`, { runId: draft.run.id, code: outcome.code });
     return status;
   }
   async #deliberate(draft: Draft, kind: RequestKind, reason: string, subject: Json, stateVersion: string | null): Promise<StepOutcome> {
     const run = draft.run;
-    const request = immutable({ id: newId(), intent: run.intent, stateVersion, reason, createdAt: this.#now(), runId: run.id, kind, subject });
-    await this.#options.deliberation.request(request);
-    draft.run = await this.#save(run, { status: 'deliberating', request: { id: request.id, kind, subject },
-      wait: [{ kind: 'deliberation', requestId: request.id }] });
-    this.#emit('run.deliberating', { runId: run.id, requestId: request.id, kind });
+    return this.#parkRequest(draft, kind, immutable({ id: newId(), intent: run.intent, stateVersion, reason,
+      createdAt: this.#now(), runId: run.id, kind, subject }));
+  }
+  /** The waiting state and full notification form one transaction in the Run store (inline outbox). */
+  async #parkRequest(draft: Draft, kind: RequestKind, message: DeliberationRequest): Promise<StepOutcome> {
+    const run = draft.run;
+    draft.run = await this.#save(run, { status: 'deliberating', stopRequested: stopping(run),
+      request: { id: message.id, kind, subject: message.subject ?? null },
+      wait: [{ kind: 'deliberation', requestId: message.id }],
+      outbox: { message, delivered: false, retryAt: this.#now() } });
+    await this.#flushOutbox(draft);
+    this.#emit('run.deliberating', { runId: run.id, requestId: message.id, kind });
     return 'deliberating';
+  }
+  /** At-least-once with a stable ID. The provider must deduplicate if delivery succeeds but acknowledgment is lost. */
+  async #flushOutbox(draft: Draft): Promise<void> {
+    const item = draft.run.outbox;
+    if (!item || item.delivered || draft.run.request?.id !== item.message.id) return;
+    const pending = { ...item, retryAt: this.#now() + draft.run.waitMs };
+    draft.run = await this.#save(draft.run, { outbox: pending });
+    // On either delivery or acknowledgment failure, the original message remains recoverable.
+    await bounded(this.#timeout, undefined, () => this.#options.deliberation.request(item.message));
+    draft.run = await this.#save(draft.run, { outbox: { ...pending, delivered: true } });
   }
 
   /** Hand the run an external event. Duplicates and events after the end are ignored; a matching event wakes a waiting run. */
@@ -313,20 +341,21 @@ export class IntentRuntime {
     assertJson(event); identifier(event.key, 'event key');
     return this.#serial(id, async () => {
       const run = await this.#load(id);
-      if (!(await this.runs.markEvent(id, event.key))) {
+      if ((run.processedEvents ?? []).includes(event.key)) {
         this.#emit('run.event.duplicate', { runId: id, key: event.key }); return { accepted: false, woke: false };
       }
       if (runTerminal(run.status)) {
         this.#emit('run.event.ignored', { runId: id, key: event.key, status: run.status }); return { accepted: false, woke: false };
       }
-      if (run.status !== 'waiting' && run.status !== 'stopping') return { accepted: true, woke: false };
       const now = this.#now();
-      const woke = event.type === 'host' || run.wait.some(c =>
+      const woke = (run.status === 'waiting' || run.status === 'stopping') && (event.type === 'host' || run.wait.some(c =>
         c.kind === 'state' ? event.type === 'state-changed' && field(event.data, 'version') !== c.version
         : c.kind === 'execution' ? event.type === 'execution-updated' && field(event.data, 'recordId') === c.recordId
-        : c.kind === 'time' ? event.type === 'timer' && now >= c.at : false);
+        : c.kind === 'time' ? event.type === 'timer' && now >= c.at : false));
+      // No separate markEvent write: a failed CAS consumes nothing, and a lost acknowledgment is safely deduplicated.
+      await this.#save(run, { processedEvents: [...(run.processedEvents ?? []), event.key],
+        ...(woke && run.status === 'waiting' ? { status: stopping(run) ? 'stopping' as const : 'active' as const, wait: [] } : {}) });
       if (!woke) return { accepted: true, woke: false };
-      if (run.status === 'waiting') await this.#save(run, { status: 'active', wait: [] });
       this.#emit('run.woken', { runId: id, key: event.key, type: event.type });
       return { accepted: true, woke: true };
     });
@@ -341,7 +370,7 @@ export class IntentRuntime {
       if (runTerminal(run.status)) return reject('run-terminal', 'The run has already ended');
       if (!run.request || run.request.id !== response.requestId) return reject('stale-response', 'The response does not answer the open request');
       if (response.intentRevision !== run.intent.revision) return reject('stale-response', 'The response refers to another intent revision');
-      const resumed = run.status === 'paused' ? 'paused' : 'active';
+      const resumed = run.status === 'paused' ? 'paused' : stopping(run) ? 'stopping' : 'active';
       let patch: Partial<Run>;
       switch (response.kind) {
         case 'fact':
@@ -361,13 +390,13 @@ export class IntentRuntime {
         case 'terminate': {
           identifier(response.reason, 'termination reason');
           const outcome = { code: 'terminated', reason: response.reason, evidence: null };
-          patch = (await this.#open(run)) ? { status: 'stopping', request: null, wait: [], approved: null, outcome }
-            : { status: 'stopped', request: null, wait: [], approved: null, outcome, lease: null };
+          patch = (await this.#open(run)) ? { status: 'stopping', stopRequested: true, request: null, wait: [], approved: null, outcome }
+            : { status: 'stopped', stopRequested: true, request: null, wait: [], approved: null, outcome, lease: null };
           break;
         }
         default: return reject('invalid-response', 'Unknown response kind');
       }
-      const next = await this.#save(run, { ...patch, answers: [...run.answers, { requestId: response.requestId, kind: response.kind, at: this.#now() }] });
+      const next = await this.#save(run, { ...patch, outbox: null, answers: [...run.answers, { requestId: response.requestId, kind: response.kind, at: this.#now() }] });
       this.#emit('run.response.applied', { runId: id, requestId: response.requestId, kind: response.kind, status: next.status });
       if (next.status === 'stopped') this.#emit('run.stopped', { runId: id, code: 'terminated' });
       return { kind: 'applied', run: next };
@@ -377,7 +406,7 @@ export class IntentRuntime {
   async pause(id: string): Promise<RunResult> {
     return this.#serial(id, async () => {
       const run = await this.#load(id);
-      if (runTerminal(run.status) || run.status === 'stopping') return rejected('run-state', `A ${run.status} run cannot be paused`);
+      if (runTerminal(run.status) || stopping(run)) return rejected('run-state', `A ${run.status} run cannot be paused`);
       if (run.status === 'paused') return { kind: 'applied', run };
       const next = await this.#save(run, { status: 'paused', wait: [] });
       this.#emit('run.paused', { runId: id });
@@ -389,7 +418,7 @@ export class IntentRuntime {
     return this.#serial(id, async () => {
       const run = await this.#load(id);
       if (run.status !== 'paused') return rejected('run-state', 'Only a paused run can be resumed');
-      const next = await this.#save(run, { status: run.request ? 'deliberating' : 'active' });
+      const next = await this.#save(run, { status: run.request ? 'deliberating' : stopping(run) ? 'stopping' : 'active' });
       this.#emit('run.resumed', { runId: id, status: next.status });
       return { kind: 'applied', run: next };
     });
@@ -402,8 +431,8 @@ export class IntentRuntime {
       if (run.status === 'stopping') return { kind: 'applied', run };
       const outcome = { code: 'stopped', reason: 'Stopped by host', evidence: null };
       const next = (await this.#open(run))
-        ? await this.#save(run, { status: 'stopping', request: null, approved: null, wait: [], outcome })
-        : await this.#save(run, { status: 'stopped', request: null, approved: null, wait: [], outcome, lease: null });
+        ? await this.#save(run, { status: 'stopping', stopRequested: true, request: null, outbox: null, approved: null, wait: [], outcome })
+        : await this.#save(run, { status: 'stopped', stopRequested: true, request: null, outbox: null, approved: null, wait: [], outcome, lease: null });
       this.#emit(next.status === 'stopped' ? 'run.stopped' : 'run.stopping', { runId: id, code: outcome.code });
       return { kind: 'applied', run: next };
     });
@@ -421,14 +450,14 @@ export class IntentRuntime {
         if (intent.id !== run.intent.id || canonical(intent.scope) !== canonical(run.intent.scope))
           return rejected('intent-mismatch', 'A revision must keep the intent id and scope');
         if (!Number.isInteger(intent.revision) || intent.revision <= run.intent.revision) return rejected('stale-intent', 'Intent revision must increase');
-        changes = { ...changes, intent, request: null, approved: null, wait: [], counters: { ...run.counters, noProgress: 0, signature: null },
-          status: run.status === 'paused' || run.status === 'stopping' ? run.status : 'active' };
+        changes = { ...changes, intent, request: null, outbox: null, approved: null, wait: [], counters: { ...run.counters, noProgress: 0, signature: null },
+          status: run.status === 'paused' ? 'paused' : stopping(run) ? 'stopping' : 'active' };
       }
       if (patch.budget !== undefined) {
         changes = { ...changes, budget: this.#budget({ ...run.budget, ...patch.budget }) };
         // A revised budget answers a budget request by itself; other requests still need a response.
         if (run.request?.kind === 'budget' && changes.request === undefined)
-          changes = { ...changes, request: null, wait: [], status: run.status === 'paused' ? 'paused' : 'active' };
+          changes = { ...changes, request: null, outbox: null, wait: [], status: run.status === 'paused' ? 'paused' : stopping(run) ? 'stopping' : 'active' };
       }
       if (patch.guidance !== undefined) {
         assertGuidance(patch.guidance);

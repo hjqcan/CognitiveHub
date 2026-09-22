@@ -52,6 +52,8 @@ export interface ExecutionContext extends PreparationContext {
   readonly operationId: string;
   /** Stable across retries. The executor must pass it to the actual task system. */
   readonly idempotencyKey: string;
+  /** Exclusive latest dispatch time (epoch ms). Host gateways must enforce it before their own side effect. */
+  readonly dispatchDeadlineAt?: number;
 }
 export type Receipt =
   | { readonly status: 'accepted'; readonly handle: string; readonly evidence: Json }
@@ -133,7 +135,7 @@ export interface DeliberationRequest {
   readonly subject?: Json;
 }
 export interface DeliberationProvider {
-  /** The host authenticates responses and reproposes against fresh state. */
+  /** At-least-once delivery: deduplicate by request.id. The host authenticates responses and reproposes against fresh state. */
   request(request: DeliberationRequest): Promise<void>;
 }
 export type ProposalResult =

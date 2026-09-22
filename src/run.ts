@@ -1,4 +1,4 @@
-import type { ExecutionRecord, Guidance, Intent, Json, Observation } from './contracts.js';
+import type { DeliberationRequest, ExecutionRecord, Guidance, Intent, Json, Observation } from './contracts.js';
 
 /**
  * Persisted run states. Observing, deciding and executing are phases inside one step(), not states:
@@ -48,6 +48,12 @@ export interface Run {
   /** Runs persisted before this field existed read as `deliberate`. */
   readonly idle: IdleMode;
   readonly status: RunStatus;
+  /** Sticky host intent, independent of waiting/recovery status. Absent in legacy v0.2 snapshots. */
+  readonly stopRequested?: boolean;
+  /** Event consumption and the resulting state change are committed in the same Run CAS. */
+  readonly processedEvents?: readonly string[];
+  /** Single outstanding notification, atomically persisted with request/status before external delivery. */
+  readonly outbox?: { readonly message: DeliberationRequest; readonly delivered: boolean; readonly retryAt: number } | null;
   /** Journal record ids of every operation this run dispatched, in order. Open ones are found in the journal, not here. */
   readonly operations: readonly string[];
   readonly wait: readonly WaitCondition[];
@@ -93,7 +99,7 @@ export interface RunStore {
   get(id: string): Promise<Run | undefined>;
   /** Compare-and-swap; MUST throw HubError('run-conflict') on a revision mismatch. */
   replace(run: Run, expectedRevision: number): Promise<void>;
-  /** Records an event key for a run; returns false when it was seen before. */
+  /** Legacy standalone deduplication API. IntentRuntime uses Run.processedEvents plus one CAS instead. */
   markEvent(runId: string, key: string): Promise<boolean>;
   unsettled(): Promise<readonly Run[]>;
 }

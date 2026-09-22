@@ -13,7 +13,7 @@ import { assertJson, assertRecord, ensure, HubError, identifier, immutable } fro
 export interface SqlClient {
   query(text: string, values?: readonly unknown[]): Promise<{ readonly rows: readonly Record<string, unknown>[] }>;
 }
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 /** Idempotent DDL in version order; each version ends by recording itself. Tables are prefixed; use search_path for further isolation. */
 export const schema: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS cognitive_hub_schema (version integer PRIMARY KEY, applied_at double precision NOT NULL)`,
@@ -28,7 +28,8 @@ export const schema: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS cognitive_hub_runs (
      id text PRIMARY KEY, tenant text NOT NULL, intent_id text NOT NULL, revision integer NOT NULL, status text NOT NULL,
      wake_at double precision, data jsonb NOT NULL, updated_at double precision NOT NULL)`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS cognitive_hub_runs_one_unsettled_per_intent ON cognitive_hub_runs (tenant, intent_id)
+  `CREATE UNIQUE INDEX IF NOT EXISTS cognitive_hub_runs_one_unsettled_per_scope_intent
+     ON cognitive_hub_runs ((data #> '{intent,scope}'), intent_id)
      WHERE status NOT IN ('completed', 'failed', 'stopped')`,
   `CREATE INDEX IF NOT EXISTS cognitive_hub_runs_due ON cognitive_hub_runs (wake_at) WHERE wake_at IS NOT NULL`,
   `CREATE TABLE IF NOT EXISTS cognitive_hub_run_events (run_id text NOT NULL, key text NOT NULL, PRIMARY KEY (run_id, key))`,
@@ -40,6 +41,13 @@ export const schema: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS cognitive_hub_decisions_by_intent ON cognitive_hub_decisions (tenant, intent_id, created_at)`,
   `CREATE INDEX IF NOT EXISTS cognitive_hub_decisions_tags ON cognitive_hub_decisions USING gin ((data -> 'tags'))`,
   `INSERT INTO cognitive_hub_schema (version, applied_at) VALUES (2, extract(epoch from now()) * 1000)
+     ON CONFLICT (version) DO NOTHING`,
+  // v3: install the scoped replacement before dropping the v1 index; preserve legacy event receipts.
+  `DROP INDEX IF EXISTS cognitive_hub_runs_one_unsettled_per_intent`,
+  `UPDATE cognitive_hub_runs r SET data = jsonb_set(r.data, '{processedEvents}',
+     COALESCE((SELECT jsonb_agg(e.key ORDER BY e.key) FROM cognitive_hub_run_events e WHERE e.run_id = r.id), '[]'::jsonb))
+     WHERE NOT (r.data ? 'processedEvents')`,
+  `INSERT INTO cognitive_hub_schema (version, applied_at) VALUES (3, extract(epoch from now()) * 1000)
      ON CONFLICT (version) DO NOTHING`,
 ];
 export async function migrate(client: SqlClient): Promise<void> {
@@ -87,6 +95,7 @@ const count = (rows: readonly Record<string, unknown>[], key: string): number =>
 /** When the host should look at a run at the latest: now for active/stopping, the earliest time bound while waiting. */
 const wakeAt = (run: Run): number | null => {
   if (run.status === 'active' || run.status === 'stopping') return run.updatedAt;
+  if (run.status === 'deliberating' && run.outbox && !run.outbox.delivered) return run.outbox.retryAt;
   if (run.status !== 'waiting') return null;
   const times = run.wait.flatMap(c => c.kind === 'time' ? [c.at] : []);
   return times.length ? Math.min(...times) : null;
