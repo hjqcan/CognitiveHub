@@ -1,6 +1,6 @@
 export type * from './contracts.js';
 export type * from './run.js';
-export { runTerminal } from './run.js';
+export { runTerminal, runWakeAt, dueRuns } from './run.js';
 export { CognitiveHub } from './hub.js';
 export type { HubOptions } from './hub.js';
 export { IntentRuntime } from './runtime.js';

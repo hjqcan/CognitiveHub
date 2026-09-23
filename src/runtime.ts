@@ -2,7 +2,7 @@ import type { DeliberationRequest, ExecutionRecord, Guidance, Intent, Json, Obse
 import type {
   Budget, DeliberationResponse, GoalEvaluator, RequestKind, Run, RunEvent, RunResult, RunSpec, RunStore, StepOutcome, StepResult, WaitCondition,
 } from './run.js';
-import { runTerminal } from './run.js';
+import { dueRuns, runTerminal } from './run.js';
 import type { HubOptions } from './hub.js';
 import { CognitiveHub } from './hub.js';
 import { MemoryRunStore, terminal } from './memory.js';
@@ -19,11 +19,19 @@ export interface RuntimeOptions extends HubOptions {
   leaseMs?: number;
   waitMs?: number;
 }
-interface Draft { run: Run }
+interface Draft { run: Run; observation: Observation | null }
 const field = (value: Json | undefined, key: string): Json | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as { readonly [key: string]: Json })[key] : undefined;
 const intentKey = (intent: Intent): string => canonical([intent.scope, intent.id]);
 const stopping = (run: Run): boolean => run.stopRequested === true || run.status === 'stopping';
+/**
+ * The settled cursor. Missing (pre-v0.3) or malformed reads as 0, which only costs one catch-up step. A value past the end
+ * can only come from an edited or corrupted snapshot; trusting it could skip an open operation, so it also reads as 0.
+ */
+const settledOf = (run: Run): number => {
+  const value = run.settled;
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= run.operations.length ? value : 0;
+};
 const rejected = (code: string, reason: string): RunResult => ({ kind: 'rejected', code, reason });
 
 /**
@@ -81,7 +89,9 @@ export class IntentRuntime {
     return immutable(run);
   }
   async #save(run: Run, patch: Partial<Run>): Promise<Run> {
-    const next: Run = immutable({ ...run, ...patch, revision: run.revision + 1, updatedAt: this.#now() });
+    // Every Run the runtime holds is already deeply frozen (#load, #save, #stage, start), so only the patch is copied:
+    // cloning the whole snapshot on each of a step's writes would make every write cost grow with the run's history.
+    const next: Run = Object.freeze({ ...run, ...immutable(patch), revision: run.revision + 1, updatedAt: this.#now() });
     await this.runs.replace(next, run.revision);
     return next;
   }
@@ -92,8 +102,9 @@ export class IntentRuntime {
     ensure(input.deadlineAt === null || Number.isFinite(input.deadlineAt), 'invalid-budget', 'deadlineAt must be null or a finite time');
     return immutable(input);
   }
+  /** Terminal records never reopen, so only operations past the settled cursor can still be open. */
   async #open(run: Run): Promise<boolean> {
-    for (const id of run.operations) {
+    for (const id of run.operations.slice(settledOf(run))) {
       const record = await this.hub.journal.get(id);
       if (record && !terminal(record.status)) return true;
     }
@@ -115,7 +126,7 @@ export class IntentRuntime {
     const run: Run = immutable({
       id: newId(), revision: 0, intent, guidance: spec.guidance ?? null, budget: this.#budget(spec.budget), approval: spec.approval, waitMs, idle,
       status: 'active', stopRequested: false, processedEvents: [], outbox: null,
-      operations: [], wait: [], request: null, approved: null, answers: [],
+      operations: [], settled: 0, wait: [], request: null, approved: null, answers: [],
       counters: { decisions: 0, actions: 0, noProgress: 0, signature: null }, progress: null, outcome: null, lease: null,
       createdAt: now, updatedAt: now,
     });
@@ -124,12 +135,14 @@ export class IntentRuntime {
     return run;
   }
   async get(id: string): Promise<Run | undefined> { return this.runs.get(id); }
-  /** Runs the host should step now: active or stopping ones, and waiting ones whose time bound has passed. */
-  async due(now = this.#now()): Promise<readonly string[]> {
-    const runs = await this.runs.unsettled();
-    return runs.filter(r => r.status === 'active' || r.status === 'stopping' ||
-      (r.status === 'waiting' && r.wait.some(c => c.kind === 'time' && now >= c.at)) ||
-      (r.status === 'deliberating' && r.outbox && !r.outbox.delivered && now >= r.outbox.retryAt)).map(r => r.id);
+  /**
+   * Runs the host should step now, earliest first: active or stopping ones, waiting ones whose time bound has passed, and
+   * undelivered notifications due for retry (see runWakeAt). Uses the store's own query when it has one.
+   */
+  async due(now = this.#now(), limit?: number): Promise<readonly string[]> {
+    ensure(Number.isFinite(now), 'invalid-options', 'now must be a finite time');
+    if (limit !== undefined) ensure(Number.isInteger(limit) && limit > 0, 'invalid-options', 'limit must be a positive integer');
+    return this.runs.due ? this.runs.due(now, limit) : dueRuns(await this.runs.unsettled(), now, limit);
   }
 
   /** One bounded advance. Returns what the step ended with; the host decides when to call again. */
@@ -139,12 +152,22 @@ export class IntentRuntime {
       if (runTerminal(run.status) || run.status === 'paused') return { run, outcome: 'idle' };
       const now = this.#now();
       if (run.lease && run.lease.owner !== this.#owner && run.lease.expiresAt > now) return { run, outcome: 'lease-held' };
+      // A quiet waiting run is checked read-only: no lease, no journal, no write unless a condition holds.
+      let observation: Observation | null = null;
+      if (this.#quiet(run, now)) {
+        if (run.wait.some(c => c.kind === 'state')) observation = await this.#observe(run.intent, options.signal);
+        const seen = observation;
+        if (!seen || !run.wait.some(c => c.kind === 'state' && seen.version !== c.version)) {
+          this.#emit('run.stepped', { runId: id, outcome: 'waiting', status: run.status });
+          return { run, outcome: 'waiting' };
+        }
+      }
       try { run = await this.#save(run, { lease: { owner: this.#owner, expiresAt: now + this.#leaseMs } }); }
       catch (error) {
         if (error instanceof HubError && error.code === 'run-conflict') return { run: await this.#load(id), outcome: 'lease-held' };
         throw error;
       }
-      const draft: Draft = { run };
+      const draft: Draft = { run, observation };
       let outcome: StepOutcome;
       try { outcome = await this.#advance(draft, options.signal); }
       finally {
@@ -165,9 +188,11 @@ export class IntentRuntime {
       await this.#flushOutbox(draft);
       return 'deliberating';
     }
-    // 1. Reconcile what an earlier step or process left open. Query only; never re-dispatch.
+    // 1. Reconcile what an earlier step or process left open, from the settled cursor on. Query only; never re-dispatch.
+    const from = settledOf(draft.run);
+    const window = draft.run.operations.slice(from);
     const records = new Map<string, ExecutionRecord>();
-    for (const recordId of draft.run.operations) {
+    for (const recordId of window) {
       let record = await this.hub.journal.get(recordId);
       if (record && !terminal(record.status)) {
         const result = await this.hub.reconcile(recordId, hubSignal);
@@ -179,14 +204,21 @@ export class IntentRuntime {
       if (record) records.set(recordId, record);
       // A missing record means the process died between the run write and the journal claim: nothing was dispatched.
     }
-    if (records.size !== draft.run.operations.length) await save({ operations: [...records.keys()] });
+    // Phantoms are always past the cursor, so dropping them leaves the settled prefix intact.
+    if (records.size !== window.length) await save({ operations: [...draft.run.operations.slice(0, from), ...records.keys()] });
     const inflight = [...records.values()].filter(r => !terminal(r.status)).map(r => r.id);
+    // Leading terminal records past the cursor. The cursor moves over them once the goal has seen them.
+    let lead = 0;
+    for (const record of records.values()) { if (!terminal(record.status)) break; lead++; }
+    const settled: Partial<Run> = lead ? { settled: from + lead } : {};
     if (stopping(draft.run)) {
-      if (inflight.length) { await save({ wait: this.#waitFor(draft.run, inflight, now) }); return 'waiting'; }
+      // A stopping run never consults the goal again, so its cursor moves here.
+      if (inflight.length) { await save({ ...settled, wait: this.#waitFor(draft.run, inflight, now), lease: null }); return 'waiting'; }
       return this.#finish(draft, 'stopped', draft.run.outcome ?? { code: 'stopped', reason: 'Stopped by host', evidence: null });
     }
-    // 2. Observe once here; the hub observes again inside propose and execute.
-    const observation = await this.#observe(draft.run.intent, signal);
+    // 2. Observe once here (or reuse the quiet check's observation); propose reuses it, execute observes again.
+    const observation = draft.observation && draft.observation.validUntil > this.#now()
+      ? draft.observation : await this.#observe(draft.run.intent, signal);
     // 3. A waiting run continues only when a registered condition holds. No decider call otherwise.
     if (draft.run.status === 'waiting') {
       const holds = (c: WaitCondition): boolean => c.kind === 'time' ? now >= c.at
@@ -196,27 +228,29 @@ export class IntentRuntime {
       if (!draft.run.wait.some(holds)) return 'waiting';
       const progressed = draft.run.wait.some(c => c.kind !== 'time' && holds(c));
       const counters = draft.run.counters;
-      await save({ status: 'active', wait: [], counters: progressed ? counters : { ...counters, noProgress: counters.noProgress + 1 } });
+      // Staged like the goal's fields below; if the goal throws, step()'s lease release persists it as before.
+      this.#stage(draft, { status: 'active', wait: [], counters: progressed ? counters : { ...counters, noProgress: counters.noProgress + 1 } });
     }
     // 4. The goal is judged on independent evidence before any action, including the first one.
-    const goal = await bounded(this.#timeout, signal, s =>
-      this.#options.goal.evaluate({ intent: draft.run.intent, observation, records: [...records.values()] }, s));
+    const goal = await bounded(this.#timeout, signal, s => this.#options.goal.evaluate(
+      { intent: draft.run.intent, observation, records: [...records.values()], operations: draft.run.operations }, s));
     assertJson(goal);
     ensure(goal.status === 'satisfied' || goal.status === 'unsatisfied' || goal.status === 'unreachable', 'invalid-goal', 'Unknown goal status');
     const progress = goal.progress === undefined ? draft.run.progress : goal.progress;
-    if (canonical(progress) !== canonical(draft.run.progress)) await save({ progress });
+    // Staged, not written: every path from here on ends in a save that carries them.
+    this.#stage(draft, { ...settled, ...(canonical(progress) !== canonical(draft.run.progress) ? { progress } : {}) });
     if (goal.status === 'satisfied') {
       // Never complete with an unknown outcome in flight.
-      if (inflight.length) { await save({ status: 'waiting', wait: this.#waitFor(draft.run, inflight, now) }); return 'waiting'; }
+      if (inflight.length) { await save({ status: 'waiting', wait: this.#waitFor(draft.run, inflight, now), lease: null }); return 'waiting'; }
       return this.#finish(draft, 'completed', { code: 'satisfied', reason: 'The goal evaluator confirmed the objective', evidence: goal.evidence });
     }
     if (goal.status === 'unreachable') {
       // Failure ends scheduling too; accepted work must remain owned until it settles.
-      if (inflight.length) { await save({ status: 'waiting', wait: this.#waitFor(draft.run, inflight, now) }); return 'waiting'; }
+      if (inflight.length) { await save({ status: 'waiting', wait: this.#waitFor(draft.run, inflight, now), lease: null }); return 'waiting'; }
       return this.#finish(draft, 'failed', { code: 'unreachable', reason: 'The goal evaluator judged the objective unreachable', evidence: goal.evidence });
     }
     // 5. One action at a time.
-    if (inflight.length) { await save({ status: 'waiting', wait: this.#waitFor(draft.run, inflight, now) }); return 'waiting'; }
+    if (inflight.length) { await save({ status: 'waiting', wait: this.#waitFor(draft.run, inflight, now), lease: null }); return 'waiting'; }
     // 6. Budgets are checked before the decider is called.
     const { budget, counters } = draft.run;
     if (budget.deadlineAt !== null && this.#now() >= budget.deadlineAt)
@@ -234,14 +268,14 @@ export class IntentRuntime {
     let proposal: ProposalResult;
     try {
       proposal = await this.hub.propose(draft.run.intent,
-        { ...hubSignal, ...(draft.run.guidance ? { guidance: draft.run.guidance } : {}), tags: { runId: draft.run.id },
+        { ...hubSignal, ...(draft.run.guidance ? { guidance: draft.run.guidance } : {}), tags: { runId: draft.run.id }, observation,
           // An idle run treats an empty candidate set as "nothing to do yet" and waits for the state to change.
           ...(draft.run.idle === 'wait' ? { onEmpty: 'wait' as const } : {}) });
     }
     finally { this.#stepping.delete(key); }
     if (proposal.kind === 'wait') {
       await save({ status: 'waiting', wait: [{ kind: 'state', version: observation.version }, { kind: 'time', at: now + draft.run.waitMs }],
-        counters: this.#count(draft.run.counters, canonical([observation.version, 'wait'])) });
+        counters: this.#count(draft.run.counters, canonical([observation.version, 'wait'])), lease: null });
       this.#emit('run.waiting', { runId: draft.run.id, reason: proposal.reason });
       return 'waiting';
     }
@@ -278,17 +312,27 @@ export class IntentRuntime {
       if (execution.kind === 'rejected') {
         this.#emit('run.dispatch.rejected', { runId: draft.run.id, code: execution.code });
         const c = draft.run.counters;
-        await save({ operations: draft.run.operations.filter(x => x !== recordId), counters: { ...c, noProgress: c.noProgress + 1 } });
+        await save({ operations: draft.run.operations.filter(x => x !== recordId), counters: { ...c, noProgress: c.noProgress + 1 }, lease: null });
         return 'rejected';
       }
       ensure(execution.kind === 'record', 'invalid-execution', 'Live execution cannot return a preview');
+      // The executed path keeps the lease until step() releases it: the operation id was written before dispatch.
       if (terminal(execution.record.status)) return 'executed';
-      await save({ status: 'waiting', wait: this.#waitFor(draft.run, [recordId], now) });
+      await save({ status: 'waiting', wait: this.#waitFor(draft.run, [recordId], now), lease: null });
       return 'waiting';
     } finally {
       // The runtime owns this proposal; persisted executions are recovered from the journal.
       this.hub.discard(proposal.id);
     }
+  }
+  /** Waiting on state or time only, nothing open, no lease to clear and no time bound reached: nothing to reconcile. */
+  #quiet(run: Run, now: number): boolean {
+    return run.status === 'waiting' && !stopping(run) && run.lease === null && settledOf(run) === run.operations.length &&
+      run.wait.length > 0 && run.wait.every(c => c.kind === 'state' || (c.kind === 'time' && now < c.at));
+  }
+  /** Carry fields into the step's next save without writing now. The revision is unchanged, so that save's CAS still holds. */
+  #stage(draft: Draft, patch: Partial<Run>): void {
+    if (Object.keys(patch).length) draft.run = Object.freeze({ ...draft.run, ...immutable(patch) });
   }
   #count(counters: Run['counters'], signature: string): Run['counters'] {
     return signature === counters.signature ? { ...counters, noProgress: counters.noProgress + 1 } : { ...counters, noProgress: 0, signature };

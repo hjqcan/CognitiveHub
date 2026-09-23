@@ -56,6 +56,12 @@ export interface Run {
   readonly outbox?: { readonly message: DeliberationRequest; readonly delivered: boolean; readonly retryAt: number } | null;
   /** Journal record ids of every operation this run dispatched, in order. Open ones are found in the journal, not here. */
   readonly operations: readonly string[];
+  /**
+   * How many leading entries of `operations` a successful goal evaluation has already seen terminal.
+   * A runtime-owned cache: terminal records never change, so it only grows. Absent before v0.3 (reads as 0).
+   * A host that rewrites `operations` must delete it.
+   */
+  readonly settled?: number;
   readonly wait: readonly WaitCondition[];
   readonly request: { readonly id: string; readonly kind: RequestKind; readonly subject: Json } | null;
   readonly approved: { readonly digest: string; readonly stateVersion: string; readonly expiresAt: number } | null;
@@ -84,8 +90,13 @@ export interface GoalEvaluation {
   readonly progress?: Json;
 }
 export interface GoalEvaluator {
-  evaluate(input: { readonly intent: Intent; readonly observation: Observation; readonly records: readonly ExecutionRecord[] },
-    signal: AbortSignal): Promise<GoalEvaluation>;
+  /**
+   * `records`: this run's operations that no earlier successful evaluation saw terminal, as reconciled by this step,
+   * in dispatch order. Usually only the latest one. Every operation is passed at least once after it becomes terminal,
+   * unless the run stops first. `operations` lists every record id; an evaluator that needs history reads the journal.
+   */
+  evaluate(input: { readonly intent: Intent; readonly observation: Observation; readonly records: readonly ExecutionRecord[];
+    readonly operations: readonly string[] }, signal: AbortSignal): Promise<GoalEvaluation>;
 }
 export interface RunEvent {
   /** Deduplication key chosen by the host; a repeated key is ignored. */
@@ -102,6 +113,25 @@ export interface RunStore {
   /** Legacy standalone deduplication API. IntentRuntime uses Run.processedEvents plus one CAS instead. */
   markEvent(runId: string, key: string): Promise<boolean>;
   unsettled(): Promise<readonly Run[]>;
+  /** Optional: ids of runs whose `runWakeAt` is at or before `now`, earliest first (ties by id). Without it the runtime filters `unsettled()`. */
+  due?(now: number, limit?: number): Promise<readonly string[]>;
+}
+/**
+ * The latest time the host should step a run: its last update while active or stopping, the retry time of an undelivered
+ * notification, or the earliest time bound while waiting. Null when only an external answer or event can move it.
+ */
+export const runWakeAt = (run: Run): number | null => {
+  if (run.status === 'active' || run.status === 'stopping') return run.updatedAt;
+  if (run.status === 'deliberating' && run.outbox && !run.outbox.delivered) return run.outbox.retryAt;
+  if (run.status !== 'waiting') return null;
+  const times = run.wait.flatMap(c => c.kind === 'time' ? [c.at] : []);
+  return times.length ? Math.min(...times) : null;
+};
+/** Reference ordering for `RunStore.due`, shared by the memory store and the runtime's fallback. */
+export function dueRuns(runs: readonly Run[], now: number, limit?: number): readonly string[] {
+  const rows = runs.flatMap(run => { const at = runWakeAt(run); return at !== null && at <= now ? [{ id: run.id, at }] : []; })
+    .sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return (limit === undefined ? rows : rows.slice(0, limit)).map(row => row.id);
 }
 export type StepOutcome = 'idle' | 'lease-held' | 'waiting' | 'executed' | 'rejected' | 'deliberating' | 'completed' | 'failed' | 'stopped';
 export interface StepResult { readonly run: Run; readonly outcome: StepOutcome }

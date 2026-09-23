@@ -2,7 +2,7 @@ import type {
   Claim, DecisionRecord, DecisionStore, DeliberationProvider, DeliberationRequest, EventSink, ExecutionJournal, ExecutionRecord, HubEvent,
 } from './contracts.js';
 import type { Run, RunStore } from './run.js';
-import { runTerminal } from './run.js';
+import { dueRuns, runTerminal } from './run.js';
 import { assertJson, assertRecord, canonical, ensure, identifier, immutable } from './primitives.js';
 
 export const terminal = (status: ExecutionRecord['status']): boolean => status === 'verified' || status === 'failed';
@@ -108,6 +108,7 @@ export class MemoryRunStore implements RunStore {
     return true;
   }
   async unsettled(): Promise<readonly Run[]> { return [...this.#runs.values()].filter(r => !runTerminal(r.status)); }
+  async due(now: number, limit?: number): Promise<readonly string[]> { return dueRuns([...this.#runs.values()], now, limit); }
   entries(): readonly Run[] { return [...this.#runs.values()]; }
   events(): readonly string[] { return [...this.#events]; }
 }

@@ -22,10 +22,10 @@ for (const id of await runtime.due()) await runtime.step(id);
 | 对象 | 内容 |
 | --- | --- |
 | `RunSpec` | `intent`、`budget`、`approval`（必填：`automatic` 或 `each-action`）、可选 `guidance`、`waitMs`、`idle`（空候选时 `deliberate` 请示或 `wait` 等待，默认 `deliberate`） |
-| `Run` | 意图快照、guidance、预算、状态、`operations`（派发过的 journal 记录 id）、`wait`、当前 `request`、`approved`、`answers`、`counters`、`progress`、`outcome`、`lease`、CAS 用的 `revision` |
+| `Run` | 意图快照、guidance、预算、状态、`operations`（派发过的 journal 记录 id）、`settled`（已确认终态的前缀长度，见 §3）、`wait`、当前 `request`、`approved`、`answers`、`counters`、`progress`、`outcome`、`lease`、CAS 用的 `revision` |
 | `Budget` | `maxDecisions`、`maxActions`、`maxNoProgress`、`deadlineAt` |
 | `Guidance` | 带版本的人类判断标准：`criteria`、`escalate`、`author`。只作为数据进入 `DecisionRequest.guidance`，Jev 适配器放进 `state.guidance`。**它不是 `Policy`**：不能放宽授权，也不能替代它 |
-| `GoalEvaluator` | `evaluate({ intent, observation, records })` → `satisfied / unsatisfied / unreachable` + 证据。无默认实现；决策器的输出永远不会进入这个端口 |
+| `GoalEvaluator` | `evaluate({ intent, observation, records, operations })` → `satisfied / unsatisfied / unreachable` + 证据。`records` 是此前成功验收尚未见过其终态的操作（通常只有最近一条），每个操作进入终态后至少出现一次；`operations` 是全部记录 id，需要历史的验收器自己读 journal。无默认实现；决策器的输出永远不会进入这个端口 |
 
 Run 只持久化可恢复的状态。observing、deciding、executing 只是 `step()` 内部的阶段，不写进 `status`：执行日志已经是“派发了什么”的唯一真相，Run 不保存第二份。
 
@@ -48,16 +48,16 @@ deliberating ──→ active   有效回应被应用；terminate 回应 → sto
 
 每次 `step(runId)` 持有该 Run 的所有权租约，按固定顺序推进，**至多派发一个动作**：
 
-1. 对 `operations` 里每条未终态记录调用 `hub.reconcile()`。只查询，绝不重发。找不到兼容能力（`unavailable-capability` / `plugin-version-mismatch`）→ `deliberating`，请求 kind 为 `recovery`。journal 里不存在的记录说明进程死在“写入 Run 之后、claim 之前”，什么都没发生，直接从 `operations` 移除。
+1. 从 `settled` 游标之后的操作开始，对每条未终态记录调用 `hub.reconcile()`。只查询，绝不重发。终态记录永不改写，游标之前的操作不再读取，所以一步的读写次数与历史长度无关。找不到兼容能力（`unavailable-capability` / `plugin-version-mismatch`）→ `deliberating`，请求 kind 为 `recovery`。journal 里不存在的记录说明进程死在“写入 Run 之后、claim 之前”，什么都没发生，直接从 `operations` 移除。
 2. `stopping` 的 Run 只做第 1 步；全部终态后变为 `stopped`。
-3. 观察一次状态。
+3. 观察一次状态；安静检查（§4）刚观测过则复用。`hub.propose()` 复用这次观测，`hub.execute()` 仍然重新观测并比对版本。
 4. `waiting` 的 Run 检查等待条件：没有任何条件成立就直接返回 `waiting`，**不调用决策器**。只被时间条件唤醒且状态版本没变，`noProgress + 1`。
-5. 调用 `GoalEvaluator`。第一步就检查，所以“目标本来就已满足”不会产生任何动作。satisfied / unreachable 但有在途操作 → 继续等待，不带着未知结果进入终态；全部核对后根据当前证据进入 completed / failed。
+5. 调用 `GoalEvaluator`。第一步就检查，所以“目标本来就已满足”不会产生任何动作。验收成功后游标才越过已终态的操作，并和 `progress` 一起随本步最后一次写入保存。satisfied / unreachable 但有在途操作 → 继续等待，不带着未知结果进入终态；全部核对后根据当前证据进入 completed / failed。
 6. 有在途操作 → `waiting`。一次只有一个动作。
 7. 预算检查：截止时间、决策次数、动作次数、无进展次数，任一耗尽 → `deliberating`（kind `budget` / `no-progress`）。
 8. `hub.propose()`。wait → 登记 `state` + `time` 条件；deliberation → `deliberating`（kind `decision`）。`idle: 'wait'` 的 Run 在没有任何授权候选时也走 wait 路径，不调用决策器、不产生请示。
 9. `each-action` 模式下核对批准（见 §5）。
-10. 先把 operationId 与 `actions + 1` 写入 Run，再 `hub.execute(..., { live: true })`。派发被拒绝（撤权、状态变化、资源占用）→ 从 `operations` 移除，`noProgress + 1`，返回 `rejected`。记录未终态 → `waiting`；已终态 → `executed`。运行时在 finally 中释放自己创建的提案，包括被拒绝、请求批准和异常路径；执行恢复依靠 journal，不依赖提案继续驻留。
+10. 先把 operationId 与 `actions + 1` 写入 Run，再 `hub.execute(..., { live: true })`。派发被拒绝（撤权、状态变化、资源占用）→ 从 `operations` 移除，`noProgress + 1`，返回 `rejected`。记录未终态 → `waiting`；已终态 → `executed`。运行时在 finally 中释放自己创建的提案，包括被拒绝、请求批准和异常路径；执行恢复依靠 journal，不依赖提案继续驻留。所有权租约的释放并入本步最后一次写入；只有“已派发且已终态”的路径保留单独的释放写入，因为 operationId 在派发前写入，提前释放会让别的 worker 把尚未 claim 的 id 当成幽灵删除。
 
 `StepResult.outcome` 取值：`idle`（终态或 paused）、`lease-held`、`waiting`、`executed`、`rejected`、`deliberating`、`completed`、`failed`、`stopped`。
 
@@ -74,6 +74,8 @@ type WaitCondition =
 运行时总会加一个 `time` 上界（`waitMs`），所以没有开放式等待。模型的 `wait` 决定被翻译成 `[state: 当前版本, time: now + waitMs]`；Choice 协议不需要表达结构化条件，等待需求来自模型，唤醒条件由运行时登记。
 
 没有候选不一定是阻塞。默认下空候选进入 `deliberating`（缺插件、被撤权时宿主应当知道）；长期存在、只在世界出现事情时才行动的 Run（审核队列为空的审核员、开盘前的做市商）用 `idle: 'wait'` 启动，空候选被翻译成同样的 `[state, time]` 等待：不调用决策器，不产生请示，但仍写一条 `outcome: 'wait'`、`decision: null` 的决策记录并计入 `decisions`；状态版本不变的定时唤醒照常累计 `noProgress`。直接使用 Hub 时对应 `propose(intent, { onEmpty: 'wait' })`。
+
+**安静检查。** 处于 `waiting`、没有停止要求、没有租约、游标之后没有操作、等待条件只有 `state` 与 `time` 且时间界未到的 Run，`step()` 先只读地观测一次：条件都不成立就直接返回 `waiting`，不取租约、不读 journal、不写存储；有条件成立才走完整路径并复用这次观测。等待执行结果的 Run 仍然每步核对。
 
 `deliver(runId, event)` 按 `event.key` 去重；`state-changed`、`execution-updated`（`data.recordId`）、`timer` 分别匹配对应条件，`host` 无条件唤醒。唤醒只把 `waiting` 改成 `active`，从不执行 step。宿主没有事件源时，定期对 `due()` 返回的 Run 调用 `step()` 也能工作，因为 step 自己会重新检查条件。
 
@@ -111,7 +113,7 @@ type WaitCondition =
 
 ## 8. 持久化与恢复
 
-`RunStore` 只有五个方法：`create`（同一意图只允许一个未终态 Run）、`get`、`replace`（CAS，版本不符抛 `run-conflict`）、`markEvent`（事件去重）、`unsettled`。`MemoryRunStore` 的 `entries()/events()` 导出普通 JSON，构造函数重建；宿主决定落盘方式，`tests/runtime-worker.mjs` 演示了每次写入后落盘的文件存储。生产环境用 `@cognitive-hub/core/pg` 的 `PgRunStore` 与 `PgJournal`：CAS、一意图一未终态 Run 的唯一索引、事件去重都由 PostgreSQL 约束保证，`wake_at` 列记录 Run 最晚该被查看的时间。
+`RunStore` 有五个必选方法：`create`（同一意图只允许一个未终态 Run）、`get`、`replace`（CAS，版本不符抛 `run-conflict`）、`markEvent`（旧的独立事件去重接口，运行时改用 `Run.processedEvents`）、`unsettled`；以及可选的 `due(now, limit?)`，按 `runWakeAt` 返回到期的 Run，最早的在前。存储没有实现它时，`runtime.due()` 用 `unsettled()` 加同一个排序规则 `dueRuns` 回退。`MemoryRunStore` 的 `entries()/events()` 导出普通 JSON，构造函数重建；宿主决定落盘方式，`tests/runtime-worker.mjs` 演示了每次写入后落盘的文件存储。生产环境用 `@cognitive-hub/core/pg` 的 `PgRunStore` 与 `PgJournal`：CAS、一意图一未终态 Run 的唯一索引、事件去重都由 PostgreSQL 约束保证，`wake_at` 列记录 Run 最晚该被查看的时间，`PgRunStore.due()` 通过它的部分索引查询，不再把所有未终态 Run 整体读出。
 
 崩溃窗口与恢复策略：
 
@@ -122,6 +124,9 @@ type WaitCondition =
 | claim 之后、回执落盘之前 | 记录 `submitted` 且 receipt 为 null，按 unknown 通过能力的 reconcile/verify 按幂等键查询 |
 | 回执之后、验证之前 | 继续 verify，不重新执行 |
 | 外部任务仍在运行 | 恢复跟踪，等待 |
+| 游标前移尚未写入 | 游标只增不减、可重算：下一步多读几条终态记录，行为不变 |
+
+`settled` 是运行时自己的缓存。缺失（v0.3 之前的快照）、非整数或超出 `operations` 长度都读作 0，只多花一次追平的读取。宿主若改写 `operations` 必须删除它；journal 与 run store 必须从同一时间点一致恢复，否则游标可能覆盖一条又变回未终态的记录。
 
 所有权租约：`step()` 开始时写入 `{ owner, expiresAt }`，结束时释放。其他 owner 持有且未过期 → `lease-held`；过期可接管；**同一 owner 重启后直接接管自己的租约**，这就是单工作进程的崩溃恢复。这不是分布式调度，也不做公平性。
 

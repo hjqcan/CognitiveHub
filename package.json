@@ -28,6 +28,7 @@
     "test:pg": "npm run build && node --env-file=.env --test tests/*.test.mjs",
     "demo": "npm run build && node examples/robot-platform.mjs",
     "replay": "node scripts/replay.mjs",
+    "bench": "npm run build && node scripts/bench-step.mjs 2000 && node scripts/bench-step.mjs 1000 --pg",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {

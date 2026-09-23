@@ -65,7 +65,7 @@ MemoryJournal 的 claim 原子预留操作 ID 和资源；replace 是版本比�
 
 ## 5. 并发与截止时间
 
-每个意图只有一个正在运行的 propose；重入返回 wait，不排队处理过期事件。宿主选择是否合并最新事件或重新触发，不照搬交易项目的高频轮询。
+每个意图只有一个正在运行的 propose；重入返回 wait，不排队处理过期事件。调用方可以把刚取得的观测交给 `propose(intent, { observation })`，仍有效就复用，否则 Hub 自己观测；`execute()` 总是重新观测，所以这不会放宽派发条件。宿主选择是否合并最新事件或重新触发，不照搬交易项目的高频轮询。
 
 一次提案/操作不能并发提交两次。决策、预检、提交和验证有明确时间上限。超时只结束等待，不证明外部操作被取消。忽略 AbortSignal 的代码可能仍在运行；决策和预检的插件租约保留到实际回调结束，迟到的模型结果不会提交执行。
 
@@ -107,7 +107,7 @@ HumanInbox 存储缺少计划、信息或授权等请求。`acknowledge()` 只�
 
 ## 8. 当前可靠性上限
 
-默认 journal、proposal、inbox、lease 全部在内存。提案和租约随进程消失；journal 可以由宿主导出为 JSON 并在新进程重建，未终态记录按插件 ID、精确版本和能力 ID 重新绑定后只做查询核对，不重发。托管运行时（`docs/runtime.md`）为 Run 提供所有权租约和 `due()` / `step()`，宿主自己调度。PostgreSQL 适配器（`./pg`）提供持久的 journal 与 run store：资源锁是主键 `(tenant, resource)` 的独立表，claim 与终态释放各在一条语句内完成；一意图一未终态 Run 由部分唯一索引保证；事件去重由主键保证。SQL 在 PGlite 上离线验证，真实服务器可选。仍未实现：内置后台循环、outbox、人工请求持久化。
+默认 journal、proposal、inbox、lease 全部在内存。提案和租约随进程消失；journal 可以由宿主导出为 JSON 并在新进程重建，未终态记录按插件 ID、精确版本和能力 ID 重新绑定后只做查询核对，不重发。托管运行时（`docs/runtime.md`）为 Run 提供所有权租约和 `due()` / `step()`，宿主自己调度；一步只核对游标之后的操作，读写次数与 Run 的历史长度无关（ADR 0007）。PostgreSQL 适配器（`./pg`）提供持久的 journal 与 run store：资源锁是主键 `(tenant, resource)` 的独立表，claim 与终态释放各在一条语句内完成；一意图一未终态 Run 由部分唯一索引保证；事件去重由主键保证。SQL 在 PGlite 上离线验证，真实服务器可选。仍未实现：内置后台循环、outbox、人工请求持久化。
 
 约定：一份 journal 同一时刻只由一个 Hub 实例驱动。两个实例同时推进同一记录时，CAS 保证只有一个写入成功，输家得到 `journal-conflict` 并在下次 reconcile 收敛到赢家的结果，不会双重执行；但这只是保护，不是多写者支持。
 

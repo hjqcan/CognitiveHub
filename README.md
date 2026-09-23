@@ -178,6 +178,8 @@ const check = await reevaluate(await decisions.list({ tag: { key: 'runId', value
 | [架构决策 0003](docs/adr/0003-managed-runtime.md) | 为什么是显式 step 而不是后台循环，Guidance 与 Policy 的分离 |
 | [架构决策 0004](docs/adr/0004-postgres-adapters.md) | 注入 SQL 客户端、每操作一条语句、用 PGlite 离线验证 |
 | [架构决策 0005](docs/adr/0005-decision-records.md) | 决策记录只来自已计算的内容、写入失败不致命、回放不执行 |
+| [架构决策 0006](docs/adr/0006-v021-correctness.md) | 停止要求、派发期限、事件消费与通知 outbox 的持久化边界 |
+| [架构决策 0007](docs/adr/0007-step-cost.md) | 单步开销与 Run 历史无关：终态游标、到期查询、安静检查、观测复用 |
 | [安全说明](SECURITY.md) | 为什么进程内插件不是沙箱 |
 | [路线图](docs/roadmap.md) | 从基础内核到真实宿主的验收条件 |
 

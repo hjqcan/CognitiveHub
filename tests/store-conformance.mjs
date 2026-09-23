@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { dueRuns } from '../dist/index.js';
 
 // One behavioural contract for every ExecutionJournal and RunStore implementation. Memory and PostgreSQL run the same cases.
 let counter = 0;
@@ -111,7 +112,36 @@ export function runStoreConformance(name, store) {
     const ids = (await s.unsettled()).map(r => r.id);
     assert.ok(ids.includes(a.id)); assert.ok(!ids.includes(b.id));
   });
+  test(`${name}: due lists runs whose wake time has passed, earliest first, and matches the reference ordering`, async () => {
+    const s = await store();
+    if (!s.due) return;                                   // optional method; the runtime falls back to unsettled()
+    // A private window of very negative times keeps rows from other tests (and earlier server runs) out of the answer.
+    const base = -1e12 - (++dueWindow) * 1e6 - (Date.now() % 1e5) * 1e7, at = x => base + x;
+    const make = (status, changes = {}) => ({ ...run(), status, updatedAt: at(changes.updatedAt ?? 0), ...changes.extra });
+    const cases = {
+      active: make('active', { updatedAt: 10 }),
+      tied: make('active', { updatedAt: 10 }),
+      stopping: make('stopping', { updatedAt: 20 }),
+      waitingDue: make('waiting', { extra: { wait: [{ kind: 'state', version: 'v1' }, { kind: 'time', at: at(30) }] } }),
+      retry: make('deliberating', { extra: { outbox: { message: { id: 'm' }, delivered: false, retryAt: at(40) } } }),
+      waitingLater: make('waiting', { extra: { wait: [{ kind: 'time', at: at(100) }] } }),
+      delivered: make('deliberating', { extra: { outbox: { message: { id: 'm' }, delivered: true, retryAt: at(5) } } }),
+      paused: make('paused', { updatedAt: 5 }),
+      future: make('active', { updatedAt: 60 }),
+    };
+    for (const r of Object.values(cases)) await s.create(r);
+    const mine = new Set(Object.values(cases).map(r => r.id));
+    const [first, second] = [cases.active.id, cases.tied.id].sort();
+    const expected = [first, second, cases.stopping.id, cases.waitingDue.id, cases.retry.id];
+    assert.deepEqual((await s.due(at(50))).filter(id => mine.has(id)), expected);
+    assert.deepEqual(await s.due(at(50), 2), [first, second]);
+    const unsettled = (await s.unsettled()).filter(r => mine.has(r.id));
+    assert.deepEqual(dueRuns(unsettled, at(50)), expected, 'the fallback over unsettled() agrees with the store');
+    for (const r of Object.values(cases)) await s.replace({ ...r, revision: 1, status: 'completed' }, 0);   // leave nothing due behind
+    assert.deepEqual((await s.due(at(1000))).filter(id => mine.has(id)), []);
+  });
 }
+let dueWindow = 0;
 
 export const decision = (changes = {}) => ({
   id: unique('decision'), intentId: changes.intentId ?? 'intent', intentRevision: 1, scope: ['tenant-a'], tags: changes.tags ?? {},

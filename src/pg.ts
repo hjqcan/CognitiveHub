@@ -1,6 +1,6 @@
 import type { Claim, DecisionRecord, DecisionStore, ExecutionJournal, ExecutionRecord } from './contracts.js';
 import type { Run, RunStore } from './run.js';
-import { runTerminal } from './run.js';
+import { runTerminal, runWakeAt } from './run.js';
 import { terminal } from './memory.js';
 import { assertJson, assertRecord, ensure, HubError, identifier, immutable } from './primitives.js';
 
@@ -80,6 +80,8 @@ const SQL = {
     WHERE id = $1 AND revision = $7 AND status NOT IN ('completed', 'failed', 'stopped') RETURNING id`,
   run: `SELECT data FROM cognitive_hub_runs WHERE id = $1`,
   unsettledRuns: `SELECT data FROM cognitive_hub_runs WHERE status NOT IN ('completed', 'failed', 'stopped') ORDER BY updated_at, id`,
+  // Served by the partial index on wake_at; wake_at is null for terminal, paused and answer-bound runs (runWakeAt).
+  dueRuns: `SELECT id FROM cognitive_hub_runs WHERE wake_at <= $1 ORDER BY wake_at, id COLLATE "C" LIMIT $2`,
   markEvent: `INSERT INTO cognitive_hub_run_events (run_id, key) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING run_id`,
   appendDecision: `INSERT INTO cognitive_hub_decisions (id, tenant, intent_id, created_at, data)
     VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (id) DO NOTHING RETURNING id`,
@@ -92,14 +94,6 @@ const uniqueViolation = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '23505';
 const parse = (value: unknown): unknown => typeof value === 'string' ? JSON.parse(value) : value;
 const count = (rows: readonly Record<string, unknown>[], key: string): number => Number(rows[0]?.[key] ?? 0);
-/** When the host should look at a run at the latest: now for active/stopping, the earliest time bound while waiting. */
-const wakeAt = (run: Run): number | null => {
-  if (run.status === 'active' || run.status === 'stopping') return run.updatedAt;
-  if (run.status === 'deliberating' && run.outbox && !run.outbox.delivered) return run.outbox.retryAt;
-  if (run.status !== 'waiting') return null;
-  const times = run.wait.flatMap(c => c.kind === 'time' ? [c.at] : []);
-  return times.length ? Math.min(...times) : null;
-};
 
 export class PgJournal implements ExecutionJournal {
   readonly #sql: SqlClient;
@@ -168,7 +162,7 @@ export class PgRunStore implements RunStore {
     let rows: readonly Record<string, unknown>[];
     try {
       ({ rows } = await this.#sql.query(SQL.createRun, [run.id, run.intent.scope[0]!, run.intent.id, run.revision, run.status,
-        wakeAt(run), JSON.stringify(run), run.updatedAt]));
+        runWakeAt(run), JSON.stringify(run), run.updatedAt]));
     } catch (error) {
       if (uniqueViolation(error)) throw new HubError('run-exists', 'An unsettled run already exists for this intent');
       throw error;
@@ -183,7 +177,7 @@ export class PgRunStore implements RunStore {
   async replace(run: Run, expectedRevision: number): Promise<void> {
     assertJson(run as unknown); identifier(run.id, 'run id');
     ensure(run.revision === expectedRevision + 1, 'run-conflict', 'Run version conflict');
-    const { rows } = await this.#sql.query(SQL.replaceRun, [run.id, run.revision, run.status, wakeAt(run), JSON.stringify(run),
+    const { rows } = await this.#sql.query(SQL.replaceRun, [run.id, run.revision, run.status, runWakeAt(run), JSON.stringify(run),
       run.updatedAt, expectedRevision]);
     if (rows.length === 1) return;
     const current = await this.get(run.id);
@@ -199,6 +193,11 @@ export class PgRunStore implements RunStore {
   async unsettled(): Promise<readonly Run[]> {
     const { rows } = await this.#sql.query(SQL.unsettledRuns);
     return rows.map(row => this.#run(row.data));
+  }
+  async due(now: number, limit?: number): Promise<readonly string[]> {
+    ensure(Number.isFinite(now), 'invalid-options', 'now must be a finite time');
+    const { rows } = await this.#sql.query(SQL.dueRuns, [now, limit ?? null]);
+    return rows.map(row => String(row.id));
   }
 }
 

@@ -123,7 +123,12 @@ export class CognitiveHub {
 
   async propose(input: Intent, options: { signal?: AbortSignal; guidance?: Guidance; tags?: Tags;
     /** With no authorized, applicable candidate: ask for deliberation (default) or return a wait without calling the decider. */
-    onEmpty?: 'deliberate' | 'wait' } = {}): Promise<ProposalResult> {
+    onEmpty?: 'deliberate' | 'wait';
+    /**
+     * A fresh observation of this intent that the caller already took (the managed runtime passes its own). Used while it
+     * is still valid, otherwise the hub observes again. execute() always re-observes, so this cannot widen what is dispatched.
+     */
+    observation?: Observation } = {}): Promise<ProposalResult> {
     const intent = this.#intent(input);
     const guidance = options.guidance;
     if (guidance !== undefined) assertGuidance(guidance);
@@ -149,7 +154,11 @@ export class CognitiveHub {
       result = await bounded(this.#decisionTimeout, options.signal, async signal => {
         began = true;
         try {
-          const observation = this.#observation(await this.#options.state.observe(intent, signal));
+          let observation: Observation | undefined;
+          if (options.observation !== undefined) {
+            try { observation = this.#observation(options.observation); } catch { /* stale or malformed: observe afresh */ }
+          }
+          observation ??= this.#observation(await this.#options.state.observe(intent, signal));
           stateVersion = observation.version; trace.observationVersion = observation.version;
           signal.throwIfAborted();
           const prepared: BoundAction[] = [];
