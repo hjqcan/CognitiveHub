@@ -1,7 +1,7 @@
 import type {
   Capability, CapabilityRegistration, Dispose, Plugin, PluginContext, Scope,
 } from './contracts.js';
-import { ensure, HubError, identifier, immutable, validScope, visible } from './primitives.js';
+import { ensure, HubError, identifier, immutable, text, validScope, visible } from './primitives.js';
 
 type Status = 'installed' | 'starting' | 'active' | 'draining' | 'stopped' | 'failed';
 interface Mount {
@@ -136,7 +136,7 @@ export class PluginHost {
   }
 
   #registerCapability(mount: Mount, capability: Capability): void {
-    identifier(capability.id, 'capability id'); identifier(capability.description, 'capability description');
+    identifier(capability.id, 'capability id'); text(capability.description, 'capability description');
     ensure(['read', 'write', 'physical'].includes(capability.effect), 'invalid-capability', 'Unknown effect type');
     for (const method of ['prepare', 'validate', 'check', 'execute', 'verify'] as const)
       ensure(typeof capability[method] === 'function', 'invalid-capability', `Missing ${method}`);

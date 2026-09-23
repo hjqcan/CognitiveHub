@@ -10,6 +10,28 @@ export function identifier(value: string, name: string): void {
   ensure(typeof value === 'string' && value.trim().length > 0 && value.length <= 512,
     'invalid-contract', `${name} must be a nonempty string (max 512 characters)`);
 }
+/**
+ * Upper bound for human-readable text: objectives, capability and candidate descriptions, decision, receipt and
+ * termination reasons. Identifiers keep 512. Deciders have their own budgets (the Jev adapter a byte limit, the model a
+ * token context), which bound the total, not any one field.
+ */
+export const TEXT_LIMIT = 4096;
+export function text(value: string, name: string, max = TEXT_LIMIT): void {
+  ensure(typeof value === 'string' && value.trim().length > 0 && value.length <= max,
+    'invalid-contract', `${name} must be nonempty text (max ${max} characters)`);
+}
+/** Shape of an intent, checked wherever one enters: propose(), and the managed runtime's start() and revise(). */
+export function assertIntent(value: unknown): asserts value is Intent {
+  assertJson(value);
+  ensure(value !== null && typeof value === 'object' && !Array.isArray(value), 'invalid-intent', 'Intent must be a JSON object');
+  const intent = value as unknown as Intent;
+  identifier(intent.id, 'intent id'); text(intent.objective, 'objective'); validScope(intent.scope);
+  ensure(Number.isInteger(intent.revision) && intent.revision >= 1, 'invalid-intent', 'Revision must be positive');
+  ensure(Array.isArray(intent.constraints) && intent.constraints.every(x => typeof x === 'string'),
+    'invalid-intent', 'Constraints must be strings');
+  ensure(Array.isArray(intent.capabilities), 'invalid-intent', 'Capabilities must be an array');
+  intent.capabilities.forEach(x => identifier(x, 'capability id'));
+}
 export function validScope(scope: Scope, allowRoot = false): void {
   ensure(Array.isArray(scope) && (allowRoot || scope.length > 0), 'invalid-scope', 'A tenant scope is required');
   scope.forEach(part => identifier(part, 'scope segment'));
@@ -71,7 +93,7 @@ export function assertReceipt(value: unknown): asserts value is Receipt {
   ensure(status === 'accepted' || status === 'completed' || status === 'failed' || status === 'unknown',
     'invalid-receipt', 'Unknown receipt status');
   if (status === 'accepted') identifier(receipt.handle as string, 'task handle');
-  if (status === 'failed' || status === 'unknown') identifier(receipt.reason as string, 'receipt reason');
+  if (status === 'failed' || status === 'unknown') text(receipt.reason as string, 'receipt reason');
   if (status !== 'unknown') ensure(Object.hasOwn(receipt, 'evidence'), 'invalid-receipt', 'Receipt evidence is required');
 }
 const STATUSES: readonly string[] = ['submitted', 'pending', 'unknown', 'verified', 'failed'];

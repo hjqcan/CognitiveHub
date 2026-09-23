@@ -8,8 +8,8 @@ import type { CapabilityLease } from './plugins.js';
 import { PluginHost } from './plugins.js';
 import { MemoryJournal, terminal } from './memory.js';
 import {
-  actionIdentity, assertGuidance, assertJson, assertReceipt, assertRecord, bounded, canonical, ensure, executionId, HubError, identifier,
-  immutable, newId, validScope,
+  actionIdentity, assertGuidance, assertIntent, assertJson, assertReceipt, assertRecord, bounded, canonical, ensure, executionId, HubError,
+  identifier, immutable, newId, text,
 } from './primitives.js';
 
 interface Proposal {
@@ -112,15 +112,8 @@ export class CognitiveHub {
     catch { this.#observerErrors++; } // Observers cannot veto or change execution.
   }
   #intent(input: Intent): Intent {
-    assertJson(input);
-    const intent = immutable(input);
-    identifier(intent.id, 'intent id'); identifier(intent.objective, 'objective'); validScope(intent.scope);
-    ensure(Number.isInteger(intent.revision) && intent.revision >= 1, 'invalid-intent', 'Revision must be positive');
-    ensure(Array.isArray(intent.constraints) && intent.constraints.every(x => typeof x === 'string'),
-      'invalid-intent', 'Constraints must be strings');
-    ensure(Array.isArray(intent.capabilities), 'invalid-intent', 'Capabilities must be an array');
-    intent.capabilities.forEach(x => identifier(x, 'capability id'));
-    return intent;
+    assertIntent(input);
+    return immutable(input);
   }
   #observation(input: Observation): Observation {
     assertJson(input);
@@ -205,7 +198,7 @@ export class CognitiveHub {
               capability: capability.id, drafts: drafts.length });
             const keys = new Set<string>();
             for (const draft of drafts) {
-              assertJson(draft as unknown); identifier(draft.key, 'candidate key'); identifier(draft.description, 'candidate description');
+              assertJson(draft as unknown); identifier(draft.key, 'candidate key'); text(draft.description, 'candidate description');
               ensure(!keys.has(draft.key), 'duplicate-candidate', 'Candidate keys must be unique within a capability');
               keys.add(draft.key);
               ensure(Array.isArray(draft.resources), 'invalid-candidate', 'Resources must be an array');
@@ -253,7 +246,7 @@ export class CognitiveHub {
           ensure(observation.validUntil > this.#now(), 'stale-state', 'State expired while deciding');
           this.#emit('decision.received', { intentId: intent.id, decisionId, kind: decision.kind,
             provider: decision.provider ?? this.#options.decision.name });
-          if (decision.kind === 'wait' || decision.kind === 'deliberate') identifier(decision.reason, 'decision reason');
+          if (decision.kind === 'wait' || decision.kind === 'deliberate') text(decision.reason, 'decision reason');
           if (decision.kind === 'wait') return { kind: 'wait' as const, reason: decision.reason };
           if (decision.kind === 'deliberate') return decision;
           ensure(decision.kind === 'action', 'invalid-decision', 'Unknown decision kind');

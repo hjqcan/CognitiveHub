@@ -7,7 +7,7 @@ import type { HubOptions } from './hub.js';
 import { CognitiveHub } from './hub.js';
 import { MemoryRunStore, terminal } from './memory.js';
 import {
-  actionDigest, assertGuidance, assertJson, bounded, canonical, ensure, executionId, HubError, identifier, immutable, newId, validScope,
+  actionDigest, assertGuidance, assertIntent, assertJson, bounded, canonical, ensure, executionId, HubError, identifier, immutable, newId, text,
 } from './primitives.js';
 
 export interface RuntimeOptions extends HubOptions {
@@ -120,9 +120,9 @@ export class IntentRuntime {
 
   async start(spec: RunSpec): Promise<Run> {
     assertJson(spec);
+    // The same check propose() applies: an intent that fails it here would fail every later step instead.
+    assertIntent(spec.intent);
     const intent = immutable(spec.intent);
-    identifier(intent.id, 'intent id'); validScope(intent.scope);
-    ensure(Number.isInteger(intent.revision) && intent.revision >= 1, 'invalid-intent', 'Revision must be positive');
     ensure(spec.approval === 'automatic' || spec.approval === 'each-action', 'invalid-run', 'approval must be automatic or each-action');
     if (spec.guidance !== undefined) assertGuidance(spec.guidance);
     const waitMs = spec.waitMs ?? this.#waitMs;
@@ -459,7 +459,7 @@ export class IntentRuntime {
           break;
         }
         case 'terminate': {
-          identifier(response.reason, 'termination reason');
+          text(response.reason, 'termination reason');
           const outcome = { code: 'terminated', reason: response.reason, evidence: null };
           patch = (await this.#open(run)) ? { status: 'stopping', stopRequested: true, request: null, wait: [], approved: null, outcome }
             : { status: 'stopped', stopRequested: true, request: null, wait: [], approved: null, outcome, lease: null };
@@ -516,8 +516,8 @@ export class IntentRuntime {
       if (runTerminal(run.status)) return rejected('run-terminal', 'The run has already ended');
       let changes: Partial<Run> = {};
       if (patch.intent !== undefined) {
+        assertIntent(patch.intent);
         const intent = immutable(patch.intent);
-        identifier(intent.id, 'intent id'); validScope(intent.scope);
         if (intent.id !== run.intent.id || canonical(intent.scope) !== canonical(run.intent.scope))
           return rejected('intent-mismatch', 'A revision must keep the intent id and scope');
         if (!Number.isInteger(intent.revision) || intent.revision <= run.intent.revision) return rejected('stale-intent', 'Intent revision must increase');

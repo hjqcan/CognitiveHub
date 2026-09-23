@@ -33,11 +33,12 @@ TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexed
 | store-conformance.mjs + stores.test.mjs | ExecutionJournal、RunStore 与 DecisionStore 的行为契约：claim 原子性、CAS、终态释放预留、一意图一未终态 Run、事件去重、`due` 的到期判定与排序、畸形记录拒绝、决策去重/回填/按 id 取回/按意图与标签查询；对内存实现和 PGlite 上的 PostgreSQL 实现各跑一遍，另测迁移幂等与锁冲突不留残余 |
 | decisions.test.mjs | 决策记录：考虑/排除/请求/决策/回填执行记录；无候选与决策器失败的记录；审计存储失败不改变结果；tags 校验 |
 | replay.test.mjs | 运行时决策记录带 runId；时间线顺序；用不同决策器重评的一致/不一致/失败；CLI 从导出 JSON 打印时间线且不派发任何动作 |
+| text-limits.test.mjs | 目标、能力描述、候选描述、决策理由、回执理由、终止理由六处 4096 通过、4097 拒绝；标识符仍 512；600 字候选描述到达决策器；start/revise 与 propose 用同一意图校验；新长度的记录可导入 |
 | decision-errors.test.mjs | 默认仍请示；wait 模式下限流、过载、非法回答、超时、思考中过期都变为带码等待且不产生请求；观测、候选准备、策略失败与决策器请示仍请示；宿主取消不计失败；状态每帧变化时连续失败按 maxNoProgress 升级、成功归零；模式随 Run 持久化，旧 Run 读作 deliberate |
 | provenance.test.mjs | 每轮都有 decisionId 且与记录一致，重叠轮次没有；provider 取决策自带值、配置名或因非法值失败；七种慢思考原因与阶段；决策中状态过期；慢 prepare 超时仍报 prepare；DOMException 的稳定码；StepResult 的 decisionId/recordId/code；恢复受阻；旧的 null subject 仍可回应；时间线带阶段与决策者 |
 | runtime-scale.test.mjs | 单步开销与历史无关：内存与 PGlite 上 200 步内每步的 journal 读取、Run 写入、观测、SQL 条数恒定；接受回执路径；旧快照一次追平；验收器收到的 records/operations；游标异常值、幽灵记录、stop 只读窗口；安静检查零写入、残留租约、时间界、与 deliver 并发、双进程无冲突；propose 复用观测 |
 | runtime-pg.test.mjs | 验收链路在 PostgreSQL 存储上重跑（回执丢失 + 重启），以及两个 worker 争夺同一 Run 时只有一个拿到租约 |
-| jev.test.mjs | 实际 HTTP shape、候选映射、概率校验、错误脱敏、deadline、体积限制 |
+| jev.test.mjs | 实际 HTTP shape、候选映射、概率校验、错误脱敏、deadline、体积限制、内置选项改写与移除、默认说明不变、自定义说明保留安全句、255 个选项上限在发请求前生效、决策带 provider |
 | examples.test.mjs | 两个不同宿主使用相同内核，不联网即可完成模拟闭环 |
 
 新增功能先添加能触发缺陷的测试，再修改实现。尤其要检查异步边界：在观察、判断、前置检查、claim、执行、回执保存或 verify 之间取消/撤权/停插件会发生什么。

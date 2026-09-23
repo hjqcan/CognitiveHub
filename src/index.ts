@@ -10,4 +10,4 @@ export type { CapabilityLease } from './plugins.js';
 export { MemoryJournal, MemoryRunStore, MemoryDecisionStore, MemoryEvents, HumanInbox } from './memory.js';
 export { timeline, reevaluate } from './replay.js';
 export type { TimelineEntry, Reevaluation } from './replay.js';
-export { HubError, assertRecord } from './primitives.js';
+export { HubError, assertIntent, assertRecord, TEXT_LIMIT } from './primitives.js';
