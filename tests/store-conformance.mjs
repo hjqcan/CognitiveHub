@@ -68,6 +68,23 @@ export function journalConformance(name, journal) {
     const ids = (await j.unsettled()).map(r => r.id);
     assert.ok(ids.includes(open.id)); assert.ok(!ids.includes(done.id));
   });
+  test(`${name}: prune removes old terminal records but keeps open, recent and retained ones`, async () => {
+    const j = await journal();
+    if (!j.prune) return;                                 // optional method
+    const base = privateWindow(), at = x => base + x;
+    const make = async (x, status) => {
+      const r = { ...record({ resources: [unique('res')] }), createdAt: at(x), updatedAt: at(x) };
+      await j.claim(r);
+      if (status !== 'submitted') await j.replace({ ...settle(r, status), updatedAt: at(x) }, 0);
+      return r;
+    };
+    const old = await make(10, 'verified'), kept = await make(10, 'failed'), recent = await make(100, 'verified'), open = await make(10, 'submitted');
+    const removed = await j.prune(at(50), [kept.id]);
+    assert.ok(removed >= 1);
+    assert.equal(await j.get(old.id), undefined);
+    for (const r of [kept, recent, open]) assert.ok(await j.get(r.id), `${r.id} is kept`);
+    assert.ok((await j.unsettled()).some(r => r.id === open.id));
+  });
   test(`${name}: malformed records are rejected before they reach storage`, async () => {
     const j = await journal();
     await assert.rejects(j.claim({ ...record(), status: 'pending' }), { code: 'invalid-record' });
@@ -112,11 +129,26 @@ export function runStoreConformance(name, store) {
     const ids = (await s.unsettled()).map(r => r.id);
     assert.ok(ids.includes(a.id)); assert.ok(!ids.includes(b.id));
   });
+  test(`${name}: prune removes finished runs that ended before the cutoff, with their event receipts`, async () => {
+    const s = await store();
+    if (!s.prune) return;
+    const base = privateWindow(), at = x => base + x;
+    const ended = { ...run(), status: 'completed', updatedAt: at(10) };
+    const later = { ...run(), status: 'failed', updatedAt: at(100) };
+    const active = { ...run(), status: 'active', updatedAt: at(10) };
+    for (const r of [ended, later, active]) await s.create(r);
+    assert.equal(await s.markEvent(ended.id, 'e1'), true);
+    assert.ok(await s.prune(at(50)) >= 1);
+    assert.equal(await s.get(ended.id), undefined);
+    assert.ok(await s.get(later.id)); assert.ok(await s.get(active.id));
+    assert.equal(await s.markEvent(ended.id, 'e1'), true, 'the pruned run\'s event receipts are gone too');
+    await s.replace({ ...active, revision: 1, status: 'completed' }, 0);
+  });
   test(`${name}: due lists runs whose wake time has passed, earliest first, and matches the reference ordering`, async () => {
     const s = await store();
     if (!s.due) return;                                   // optional method; the runtime falls back to unsettled()
     // A private window of very negative times keeps rows from other tests (and earlier server runs) out of the answer.
-    const base = -1e12 - (++dueWindow) * 1e6 - (Date.now() % 1e5) * 1e7, at = x => base + x;
+    const base = privateWindow(), at = x => base + x;
     const make = (status, changes = {}) => ({ ...run(), status, updatedAt: at(changes.updatedAt ?? 0), ...changes.extra });
     const cases = {
       active: make('active', { updatedAt: 10 }),
@@ -142,6 +174,8 @@ export function runStoreConformance(name, store) {
   });
 }
 let dueWindow = 0;
+/** A private window of very negative times, below every other test's rows and earlier server runs' leftovers. */
+const privateWindow = () => -1e12 - (++dueWindow) * 1e6 - (Date.now() % 1e5) * 1e7;
 
 export const decision = (changes = {}) => ({
   id: unique('decision'), intentId: changes.intentId ?? 'intent', intentRevision: 1, scope: ['tenant-a'], tags: changes.tags ?? {},
@@ -164,6 +198,15 @@ export function decisionStoreConformance(name, store) {
       assert.deepEqual(await s.get(d.id), { ...d, recordId: 'record-1' });
       assert.equal(await s.get(unique('missing')), undefined);
     }
+  });
+  test(`${name}: prune removes records created before the cutoff`, async () => {
+    const s = await store();
+    if (!s.prune) return;
+    const base = privateWindow(), intentId = unique('intent');
+    const old = decision({ intentId, createdAt: base + 10 }), recent = decision({ intentId, createdAt: base + 100 });
+    await s.append(old); await s.append(recent);
+    assert.ok(await s.prune(base + 50) >= 1);
+    assert.deepEqual((await s.list({ intentId })).map(d => d.id), [recent.id]);
   });
   test(`${name}: list filters by intent and tag, in time order, with a limit`, async () => {
     const s = await store(); const intentId = unique('intent'), runId = unique('run');

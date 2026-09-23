@@ -13,7 +13,7 @@ import { assertJson, assertRecord, ensure, HubError, identifier, immutable } fro
 export interface SqlClient {
   query(text: string, values?: readonly unknown[]): Promise<{ readonly rows: readonly Record<string, unknown>[] }>;
 }
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 /** Idempotent DDL in version order; each version ends by recording itself. Tables are prefixed; use search_path for further isolation. */
 export const schema: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS cognitive_hub_schema (version integer PRIMARY KEY, applied_at double precision NOT NULL)`,
@@ -49,6 +49,12 @@ export const schema: readonly string[] = [
      WHERE NOT (r.data ? 'processedEvents')`,
   `INSERT INTO cognitive_hub_schema (version, applied_at) VALUES (3, extract(epoch from now()) * 1000)
      ON CONFLICT (version) DO NOTHING`,
+  // Version 4: indexes for retention. Only terminal rows are ever pruned, so the indexes are partial.
+  `CREATE INDEX IF NOT EXISTS cognitive_hub_records_settled ON cognitive_hub_records (updated_at) WHERE status IN ('verified', 'failed')`,
+  `CREATE INDEX IF NOT EXISTS cognitive_hub_runs_ended ON cognitive_hub_runs (updated_at) WHERE status IN ('completed', 'failed', 'stopped')`,
+  `CREATE INDEX IF NOT EXISTS cognitive_hub_decisions_created ON cognitive_hub_decisions (created_at)`,
+  `INSERT INTO cognitive_hub_schema (version, applied_at) VALUES (4, extract(epoch from now()) * 1000)
+     ON CONFLICT (version) DO NOTHING`,
 ];
 export async function migrate(client: SqlClient): Promise<void> {
   for (const statement of schema) await client.query(statement);
@@ -73,6 +79,9 @@ const SQL = {
       RETURNING resource)
     SELECT (SELECT count(*)::int FROM upd) AS updated`,
   record: `SELECT data FROM cognitive_hub_records WHERE id = $1`,
+  // Terminal records hold no locks (released in the same statement that settled them), so nothing references them.
+  pruneRecords: `WITH gone AS (DELETE FROM cognitive_hub_records WHERE status IN ('verified', 'failed') AND updated_at < $1
+      AND NOT (id = ANY($2::text[])) RETURNING id) SELECT count(*)::int AS removed FROM gone`,
   unsettledRecords: `SELECT data FROM cognitive_hub_records WHERE status NOT IN ('verified', 'failed') ORDER BY updated_at, id`,
   createRun: `INSERT INTO cognitive_hub_runs (id, tenant, intent_id, revision, status, wake_at, data, updated_at)
     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8) ON CONFLICT (id) DO NOTHING RETURNING id`,
@@ -82,6 +91,10 @@ const SQL = {
   unsettledRuns: `SELECT data FROM cognitive_hub_runs WHERE status NOT IN ('completed', 'failed', 'stopped') ORDER BY updated_at, id`,
   // Served by the partial index on wake_at; wake_at is null for terminal, paused and answer-bound runs (runWakeAt).
   dueRuns: `SELECT id FROM cognitive_hub_runs WHERE wake_at <= $1 ORDER BY wake_at, id COLLATE "C" LIMIT $2`,
+  pruneRuns: `WITH gone AS (DELETE FROM cognitive_hub_runs WHERE status IN ('completed', 'failed', 'stopped') AND updated_at < $1 RETURNING id),
+    events AS (DELETE FROM cognitive_hub_run_events WHERE run_id IN (SELECT id FROM gone) RETURNING run_id)
+    SELECT count(*)::int AS removed FROM gone`,
+  pruneDecisions: `WITH gone AS (DELETE FROM cognitive_hub_decisions WHERE created_at < $1 RETURNING id) SELECT count(*)::int AS removed FROM gone`,
   markEvent: `INSERT INTO cognitive_hub_run_events (run_id, key) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING run_id`,
   appendDecision: `INSERT INTO cognitive_hub_decisions (id, tenant, intent_id, created_at, data)
     VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (id) DO NOTHING RETURNING id`,
@@ -144,6 +157,11 @@ export class PgJournal implements ExecutionJournal {
     const { rows } = await this.#sql.query(SQL.unsettledRecords);
     return rows.map(row => this.#record(row.data));
   }
+  async prune(settledBefore: number, retain: readonly string[] = []): Promise<number> {
+    ensure(Number.isFinite(settledBefore), 'invalid-options', 'settledBefore must be a finite time');
+    const { rows } = await this.#sql.query(SQL.pruneRecords, [settledBefore, [...retain]]);
+    return count(rows, 'removed');
+  }
 }
 
 export class PgRunStore implements RunStore {
@@ -195,6 +213,11 @@ export class PgRunStore implements RunStore {
     const { rows } = await this.#sql.query(SQL.unsettledRuns);
     return rows.map(row => this.#run(row.data));
   }
+  async prune(endedBefore: number): Promise<number> {
+    ensure(Number.isFinite(endedBefore), 'invalid-options', 'endedBefore must be a finite time');
+    const { rows } = await this.#sql.query(SQL.pruneRuns, [endedBefore]);
+    return count(rows, 'removed');
+  }
   async due(now: number, limit?: number): Promise<readonly string[]> {
     ensure(Number.isFinite(now), 'invalid-options', 'now must be a finite time');
     const { rows } = await this.#sql.query(SQL.dueRuns, [now, limit ?? null]);
@@ -217,6 +240,11 @@ export class PgDecisionStore implements DecisionStore {
     const { rows } = await this.#sql.query(SQL.appendDecision,
       [record.id, record.scope[0] ?? '', record.intentId, record.createdAt, JSON.stringify(record)]);
     ensure(rows.length === 1, 'duplicate-decision', `Duplicate decision ${record.id}`);
+  }
+  async prune(createdBefore: number): Promise<number> {
+    ensure(Number.isFinite(createdBefore), 'invalid-options', 'createdBefore must be a finite time');
+    const { rows } = await this.#sql.query(SQL.pruneDecisions, [createdBefore]);
+    return count(rows, 'removed');
   }
   async get(id: string): Promise<DecisionRecord | undefined> {
     const { rows } = await this.#sql.query(SQL.decision, [id]);

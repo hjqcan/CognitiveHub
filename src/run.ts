@@ -122,6 +122,8 @@ export interface RunStore {
   unsettled(): Promise<readonly Run[]>;
   /** Optional: ids of runs whose `runWakeAt` is at or before `now`, earliest first (ties by id). Without it the runtime filters `unsettled()`. */
   due?(now: number, limit?: number): Promise<readonly string[]>;
+  /** Optional: delete terminal runs (and their event receipts) that ended before `endedBefore`; returns how many. */
+  prune?(endedBefore: number): Promise<number>;
 }
 /**
  * The latest time the host should step a run: its last update while active or stopping, the retry time of an undelivered

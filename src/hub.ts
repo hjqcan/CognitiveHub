@@ -67,6 +67,11 @@ export interface HubOptions {
   events?: EventSink;
   /** Optional audit of every turn. Failures are counted like observer errors and never change the outcome. */
   decisions?: DecisionStore;
+  /**
+   * Keep observation facts in the stored decision request (default true). False stores `facts: null`, which shrinks the
+   * audit (the facts are most of an ~11 KB record in the games) at the cost of re-evaluating against the facts later.
+   */
+  recordFacts?: boolean;
   proposalTtlMs?: number;
   decisionTimeoutMs?: number;
   executionTimeoutMs?: number;
@@ -289,11 +294,13 @@ export class CognitiveHub {
     trace: Trace, result: ProposalResult, code: string | null): Promise<void> {
     const store = this.#options.decisions;
     if (!store) return;
+    const request = trace.request && this.#options.recordFacts === false
+      ? { ...trace.request, observation: { ...trace.request.observation, facts: null } } : trace.request;
     const record: DecisionRecord = immutable({
       id, intentId: intent.id, intentRevision: intent.revision, scope: intent.scope, tags,
       observationVersion: trace.observationVersion, guidanceVersion: guidance?.version ?? null,
       notRequested: trace.notRequested, considered: trace.considered, excluded: trace.excluded,
-      request: trace.request, provider: trace.decision?.provider ?? this.#options.decision.name, decision: trace.decision,
+      request, provider: trace.decision?.provider ?? this.#options.decision.name, decision: trace.decision,
       outcome: result.kind === 'proposal' ? 'proposal' : result.kind === 'wait' ? 'wait' : 'deliberation', code, phase: trace.phase,
       proposalId: result.kind === 'proposal' ? result.id : null,
       requestId: result.kind === 'deliberation' ? result.request.id : null,

@@ -30,9 +30,10 @@ TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexed
 | runtime.test.mjs | 托管运行时：一步一动作、目标先检查、模型 wait 与时间唤醒、事件去重、预算与修订、过期回应、每步批准、guidance 版本、stop/terminate/pause、租约、撤权拒绝、版本变化阻塞、幽灵操作清理、due、意图修订 |
 | runtime-chain.test.mjs | v0.2 验收链路（进程内）：第一步完成 → 第二步回执丢失 → 快照重建 → 按键核对不重复 → 缺信息等人 → 补充后完成 |
 | runtime-kill.test.mjs | 真实 SIGKILL：worker 在派发中被杀，下一次 worker 按幂等键核对，外部提交计数不变，最终 completed |
-| store-conformance.mjs + stores.test.mjs | ExecutionJournal、RunStore 与 DecisionStore 的行为契约：claim 原子性、CAS、终态释放预留、一意图一未终态 Run、事件去重、`due` 的到期判定与排序、畸形记录拒绝、决策去重/回填/按 id 取回/按意图与标签查询；对内存实现和 PGlite 上的 PostgreSQL 实现各跑一遍，另测迁移幂等与锁冲突不留残余 |
+| store-conformance.mjs + stores.test.mjs | ExecutionJournal、RunStore 与 DecisionStore 的行为契约：claim 原子性、CAS、终态释放预留、一意图一未终态 Run、事件去重、`due` 的到期判定与排序、三种 `prune`、畸形记录拒绝、决策去重/回填/按 id 取回/按意图与标签查询；对内存实现和 PGlite 上的 PostgreSQL 实现各跑一遍，另测迁移幂等与锁冲突不留残余 |
 | decisions.test.mjs | 决策记录：考虑/排除/请求/决策/回填执行记录；无候选与决策器失败的记录；审计存储失败不改变结果；tags 校验 |
 | replay.test.mjs | 运行时决策记录带 runId；时间线顺序；用不同决策器重评的一致/不一致/失败；CLI 从导出 JSON 打印时间线且不派发任何动作 |
+| retention.test.mjs | runtime.prune 在内存与 PGlite 上删除已结束 Run、其记录与旧决策记录，保留活跃 Run 引用的全部记录且之后照常推进；不支持清理的存储返回 null；recordFacts 关闭时只丢观测事实 |
 | multi-run.test.mjs | 限流器在飞数不超过并发、先进先出、调用方放弃不提前释放槽位、排队中取消不花预算、预算计数与耗尽后请示、调高后恢复、provider 透传；stepDue 按唤醒时间排序、并发与 limit、不饿死、错误隔离、signal；8 个 Run 共用预算与并发 2；stopAll 的依赖顺序与排空中止后的跳过 |
 | text-limits.test.mjs | 目标、能力描述、候选描述、决策理由、回执理由、终止理由六处 4096 通过、4097 拒绝；标识符仍 512；600 字候选描述到达决策器；start/revise 与 propose 用同一意图校验；新长度的记录可导入 |
 | decision-errors.test.mjs | 默认仍请示；wait 模式下限流、过载、非法回答、超时、思考中过期都变为带码等待且不产生请求；观测、候选准备、策略失败与决策器请示仍请示；宿主取消不计失败；状态每帧变化时连续失败按 maxNoProgress 升级、成功归零；模式随 Run 持久化，旧 Run 读作 deliberate |

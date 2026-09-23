@@ -19,3 +19,22 @@
 4. **`PluginHost.stopAll()`。**
    - 按 requires/provides 分轮，每轮并发停止。依次停止会让第一个慢的排空耗光共享的 signal。
    - 部分失败不抛错。排空被中止、仍在 draining 的插件继续持有它依赖的服务，这些服务记为 skipped；清理失败（failed）的插件不再持有，与 `stop()` 的依赖规则一致。
+
+## 决策：记录保留
+
+5. **三个可选的 `prune`。**
+   - `DecisionStore.prune(createdBefore)`：删除截止时间前创建的决策记录。之后对已删记录的 `link` 像其他审计写入一样只计数。
+   - `RunStore.prune(endedBefore)`：只删终态 Run，PostgreSQL 同时删它们的事件回执。
+   - `ExecutionJournal.prune(settledBefore, retain)`：只删终态记录，终态记录不持有锁。
+6. **执行记录只能经运行时清理。** 直接删 journal 有两个风险：
+   - 活跃 Run 的窗口里缺失的记录会被当成“写入 Run 后、claim 前崩溃”的幽灵记录丢弃，目标验收也会失去证据；
+   - 直接用 Hub 的宿主用已删除的 operationId 重试会重新派发。
+   因此 `runtime.prune({ before })` 先收集所有未终态 Run 的 `operations` 作为保留集。直接用 Hub 的宿主必须让保留期长于重试窗口。
+7. **`recordFacts: false`。** 单局 11–13 MB 的导出主要是每条约 11 KB 的决策记录，其中大部分是观测事实。按时间清理缩小不了单局导出，所以提供不存事实的选项，代价是之后无法用原事实重评。
+8. **PostgreSQL schema v4。** 为三种清理查询加部分索引，迁移仍幂等。
+
+## 代价
+
+- 仍保留的已结束 Run 若运行时间跨过截止时间，其较早的执行记录会被清掉，时间线不完整。截止时间应早于还想复盘的一切。
+- `processedEvents`、`answers`、`operations` 在 Run 内部仍随历史增长（ADR 0007），清理不影响未结束的 Run。
+- 部署新版本前要运行 `migrate()` 升到 v4；旧版本忽略新索引，可以共存，但不应混用 worker（ADR 0006）。

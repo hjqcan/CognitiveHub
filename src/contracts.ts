@@ -201,6 +201,13 @@ export interface ExecutionJournal {
   replace(record: ExecutionRecord, expectedRevision: number): Promise<void>;
   /** Non-terminal records, so a fresh process can reconcile what an earlier one left open. */
   unsettled(): Promise<readonly ExecutionRecord[]>;
+  /**
+   * Optional: delete terminal records last updated before `settledBefore`, except the ids in `retain`; returns how many.
+   * Terminal records are idempotency history: a retry of a pruned operation id dispatches again. Managed runtimes call it
+   * through `IntentRuntime.prune()`, which retains every record an unsettled run refers to; direct hub users must keep
+   * the retention window longer than any retry of the same operation id.
+   */
+  prune?(settledBefore: number, retain: readonly string[]): Promise<number>;
 }
 export type ExecutionResult =
   /** unchanged: this call wrote nothing, because the operation was already recorded or nothing new was learned. */
@@ -247,6 +254,8 @@ export interface DecisionStore {
   link(id: string, recordId: string): Promise<void>;
   /** Optional: one record by id, for hosts that follow a StepResult's or ProposalResult's decisionId. */
   get?(id: string): Promise<DecisionRecord | undefined>;
+  /** Optional: delete records created before `createdBefore`; returns how many. A later link() to one of them fails like any audit write. */
+  prune?(createdBefore: number): Promise<number>;
   /** Ascending by createdAt; limit keeps the earliest matches. */
   list(query?: { readonly intentId?: string; readonly tag?: { readonly key: string; readonly value: string }; readonly limit?: number }):
     Promise<readonly DecisionRecord[]>;

@@ -62,7 +62,7 @@ submitted ──→ pending ──→ verified
 
 写/物理能力必须声明至少一个资源。资源锁键是 `(tenant, resourceId)`，不同任务或机器人 Hub 在同一进程中应共享同一个 journal，并采用一致资源命名，如 `robot:R01`。资源列表由可信适配器生成，不能依赖模型枚举完整冲突集合。
 
-MemoryJournal 的 claim 原子预留操作 ID 和资源；replace 是版本比较更新，版本不符必须抛 `journal-conflict`。submitted、pending、unknown 持有资源，verified/failed 释放。日志不会自动删除，否则幂等历史会丢失；生产实现需要 retention 和迁移策略。
+MemoryJournal 的 claim 原子预留操作 ID 和资源；replace 是版本比较更新，版本不符必须抛 `journal-conflict`。submitted、pending、unknown 持有资源，verified/failed 释放。日志不会自动删除：终态记录就是幂等历史，删掉之后用同一 operationId 重试会重新派发。清理是显式的：`ExecutionJournal.prune(settledBefore, retain)` 只删早于截止时间的终态记录并保留 `retain` 中的 id；托管运行时通过 `runtime.prune({ before })` 调用它，自动保留所有未终态 Run 引用的记录，同时清理截止时间前结束的 Run 与决策记录。直接使用 Hub 的宿主要让保留期长于同一 operationId 的任何重试窗口。
 
 `entries()` 导出普通 JSON；`new MemoryJournal(records)` 逐条校验形状后重建，非终态记录重新占用资源，两条未终态记录占同一资源视为数据损坏直接抛错。终态记录是幂等历史，必须一起导入。`unsettled()` 列出非终态记录，供宿主启动后逐条 `reconcile()`。宿主自己决定把 JSON 落到哪里；这不是数据库，也没有 outbox。
 

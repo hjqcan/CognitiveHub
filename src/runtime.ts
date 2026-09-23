@@ -180,6 +180,24 @@ export class IntentRuntime {
     return results.filter((r): r is DueStep => r !== undefined);
   }
 
+  /**
+   * Retention in one call: decision records created, terminal runs ended, and terminal journal records settled before
+   * `before`. Every journal record that an unsettled run refers to is kept, so no active run loses goal evidence or has a
+   * dispatched operation mistaken for one that never happened. Records of kept finished runs older than `before` do go;
+   * choose `before` older than anything still worth inspecting. A store without `prune` reports null.
+   */
+  async prune(options: { readonly before: number }): Promise<{ readonly decisions: number | null; readonly runs: number | null; readonly records: number | null }> {
+    ensure(Number.isFinite(options.before), 'invalid-options', 'before must be a finite time');
+    const retain = (await this.runs.unsettled()).flatMap(run => run.operations);
+    const journal = this.hub.journal;
+    const records = journal.prune ? await journal.prune(options.before, retain) : null;
+    const runs = this.runs.prune ? await this.runs.prune(options.before) : null;
+    const store = this.#options.decisions;
+    const decisions = store?.prune ? await store.prune(options.before) : null;
+    this.#emit('runtime.pruned', { before: options.before, decisions, runs, records });
+    return { decisions, runs, records };
+  }
+
   /** One bounded advance. Returns what the step ended with; the host decides when to call again. */
   async step(id: string, options: { signal?: AbortSignal } = {}): Promise<StepResult> {
     return this.#serial(id, async () => {

@@ -14,6 +14,6 @@ The PostgreSQL adapters take an injected client and issue only parameterized sta
 
 Decision records store the full request the decider saw, including observation facts and bound candidate inputs; govern them like the journal. `scripts/replay.mjs --reevaluate jev` sends recorded state to the external API and only runs with an explicitly provided key.
 
-Memory journals and deliberation inboxes contain business data. They require host-side access control, retention, deletion, and encrypted persistence before production. The event sink is observability, not a durable security audit.
+Memory journals and deliberation inboxes contain business data. They require host-side access control, retention, deletion, and encrypted persistence before production. `IntentRuntime.prune({ before })` deletes decision records, finished runs and terminal journal records older than the cutoff while keeping every record an unsettled run refers to; `recordFacts: false` keeps observation facts out of decision records. Terminal journal records are idempotency history: a host that prunes the journal directly must keep them longer than any retry of the same operation id. The event sink is observability, not a durable security audit.
 
 Do not commit `.env`, live API keys, production traces, or customer data. If reporting a vulnerability, avoid publishing secrets or weaponized details in public issues; use GitHub private vulnerability reporting if the repository enables it, otherwise contact the maintainer privately.

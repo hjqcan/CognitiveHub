@@ -56,6 +56,13 @@ export class MemoryJournal implements ExecutionJournal {
     this.#records.set(record.id, immutable(record));
     if (terminal(record.status)) for (const key of this.#resources(record)) this.#locks.delete(key);
   }
+  async prune(settledBefore: number, retain: readonly string[] = []): Promise<number> {
+    const keep = new Set(retain);
+    let removed = 0;
+    for (const [id, record] of this.#records)
+      if (terminal(record.status) && record.updatedAt < settledBefore && !keep.has(id)) { this.#records.delete(id); removed++; }
+    return removed;
+  }
   entries(): readonly ExecutionRecord[] { return [...this.#records.values()]; }
 }
 export class HumanInbox implements DeliberationProvider {
@@ -109,6 +116,12 @@ export class MemoryRunStore implements RunStore {
   }
   async unsettled(): Promise<readonly Run[]> { return [...this.#runs.values()].filter(r => !runTerminal(r.status)); }
   async due(now: number, limit?: number): Promise<readonly string[]> { return dueRuns([...this.#runs.values()], now, limit); }
+  async prune(endedBefore: number): Promise<number> {
+    const gone = new Set<string>();
+    for (const [id, run] of this.#runs) if (runTerminal(run.status) && run.updatedAt < endedBefore) { this.#runs.delete(id); gone.add(id); }
+    for (const key of this.#events) { const [runId] = JSON.parse(key) as [string, string]; if (gone.has(runId)) this.#events.delete(key); }
+    return gone.size;
+  }
   entries(): readonly Run[] { return [...this.#runs.values()]; }
   events(): readonly string[] { return [...this.#events]; }
 }
@@ -134,6 +147,11 @@ export class MemoryDecisionStore implements DecisionStore {
     this.#records.set(id, immutable({ ...current, recordId }));
   }
   async get(id: string): Promise<DecisionRecord | undefined> { return this.#records.get(id); }
+  async prune(createdBefore: number): Promise<number> {
+    let removed = 0;
+    for (const [id, record] of this.#records) if (record.createdAt < createdBefore) { this.#records.delete(id); removed++; }
+    return removed;
+  }
   async list(query: { readonly intentId?: string; readonly tag?: { readonly key: string; readonly value: string }; readonly limit?: number } = {}):
     Promise<readonly DecisionRecord[]> {
     const rows = [...this.#records.values()]
