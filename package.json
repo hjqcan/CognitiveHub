@@ -1,6 +1,6 @@
 {
   "name": "@cognitive-hub/core",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Embeddable, plugin-first cognitive middleware between deliberation and execution.",
   "type": "module",
@@ -33,6 +33,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",
+    "pg": "8.23.0",
     "typescript": "5.8.3"
   }
 }

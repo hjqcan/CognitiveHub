@@ -175,4 +175,4 @@ const { failed, skipped } = await plugins.stopAll({ signal: AbortSignal.timeout(
 
 ## 消费端验证
 
-两个独立游戏的 v0.2 接入、发现的核心问题、验证边界和使用评价见 [游戏接入报告](game-integration-v0.2.md)。
+两个独立游戏的 v0.2 接入、发现的核心问题、验证边界和使用评价见 [游戏接入报告](game-integration-v0.2.md)；v0.3 的回归门槛与各游戏可以删掉的绕路见 [v0.3 回归报告](game-integration-v0.3.md)。

@@ -24,21 +24,21 @@
 
 ## 当前状态
 
-这是 **v0.1 foundation**：可以编译、测试、运行模拟闭环的底层实现，不是生产机器人控制系统。
+这是 **v0.3**：可以编译、测试、运行模拟闭环的内核，已被三个独立游戏作为真实消费者验证，但不是生产机器人控制系统。
 
-已实现：类型化契约；依赖驱动的插件激活与回滚；作用域能力注册；能力停用与在途排空；有限候选构造；直接 Jev HTTP 适配；状态/策略过期拒绝；默认预览；单次提案消费；进程内幂等与资源预留；未知结果核对；人工请求收件箱；内存事件记录；journal 导出/导入与进程重启后对未终态记录的查询核对；不含进程内激活代次的稳定动作身份；机器可读的拒绝码；可选的托管运行时（Run 生命周期、`step()` 串行推进、目标验收端口、结构化等待与唤醒、四类慢思考回应、每步批准模式、预算与无进展检测、Run 所有权租约、Run 存储导出/导入）。
+- **单轮内核**：类型化契约；依赖驱动的插件激活与回滚；作用域能力注册；停用与在途排空；有限候选构造；直接 Jev HTTP 适配；状态与策略过期拒绝；默认预览；单次提案消费；进程内幂等与资源预留；未知结果只查询核对；重启后按精确插件版本重新绑定；机器可读的拒绝码。
+- **托管运行时**：Run 生命周期与 `step()` 推进，单步开销与历史长度无关；目标验收端口；结构化等待与唤醒；四类慢思考回应，请求随 Run 原子保存后至少一次投递；逐步批准模式与只提案不派发的旁路模式；预算与无进展检测；决策器暂时失败时可以等待而不是请人；Run 所有权租约；`stepDue()` 按并发上限推进多个 Run。
+- **存储**：PostgreSQL 适配器 `@cognitive-hub/core/pg`，注入式 SQL 客户端、每个操作一条语句、到期查询走索引，与内存实现共用一套一致性测试，CI 同时对 PGlite 与真实 PostgreSQL 17 运行。
+- **可观测**：每轮都有 `decisionId`，决策记录写明决策者、在哪个阶段结束、为什么请示；步进结果带决策、执行记录与失败码；只读回放（时间线、用另一个决策器重评、按宿主实际决定比较旁路建议）。
+- **多 Run 与保留**：共享决策器的并发上限与调用预算；按依赖顺序停止所有插件；按时间清理决策记录、已结束 Run 与终态执行记录，同时保留进行中的 Run 需要的一切。
 
-已实现（存储）：PostgreSQL 适配器 `@cognitive-hub/core/pg`，注入式 SQL 客户端、每个操作一条语句、与内存实现共用一套一致性测试。
-
-已实现（可观测）：决策记录（每轮 propose 考虑了什么、被策略排除了什么、决策器看到了什么、选了什么、对应哪条执行记录）与只读回放（时间线、用另一个决策器重评）。
-
-尚未实现：outbox、内置后台循环（宿主调度 `due()` / `step()`）、分布式资源锁、网络认证服务、签名执行许可、插件沙箱/市场、MCP、C# SDK、真实机器人适配器、任意目标规划、取消/补偿端口。详见 [实现边界](docs/architecture.md) 和 [路线图](docs/roadmap.md)。
+尚未实现：内置后台循环（宿主调度 `due()` / `step()` / `stepDue()`）、分布式调度与多写者、网络认证服务、签名执行许可、插件沙箱/市场、MCP、C# SDK、真实机器人适配器、任意目标规划、取消/补偿端口、Run 内部列表（`operations`、`processedEvents`）的压缩。详见 [实现边界](docs/architecture.md) 和 [路线图](docs/roadmap.md)。
 
 原始 [v0.1 蓝图](docs/cognitive-hub-v0.1-blueprint.md) 保留不改；其中的 Issue 应用和大平台规划不是当前实现。本仓库以嵌入式插件内核为基线。
 
 ## 快速开始
 
-需要 Node.js 22+。TypeScript 严格模式，**零运行时依赖**；开发依赖只有 TypeScript 5.8.3 和用于离线验证 SQL 适配器的 PGlite 0.5.8。
+需要 Node.js 22+。TypeScript 严格模式，**零运行时依赖**；开发依赖只有 TypeScript 5.8.3、用于离线验证 SQL 适配器的 PGlite 0.5.8，以及对真实服务器运行同一套测试的 pg 8.23.0。
 
 ```bash
 npm install --ignore-scripts
@@ -114,7 +114,7 @@ if (proposal.kind === 'proposal') {
 
 ## 托管运行时（可选）
 
-宿主也可以交付一个完整目标，让运行时持续推进。它不在后台循环：宿主在事件到达或 `due()` 到期时调用 `step()`，每次至多派发一个动作；目标完成必须由 `GoalEvaluator` 用宿主证据确认。只在世界出现事情时才需要行动的 Run 可以用 `idle: 'wait'` 启动：没有候选时等待状态变化，而不是请示。完整说明见 [托管运行时](docs/runtime.md)。
+宿主也可以交付一个完整目标，让运行时持续推进。它不在后台循环：宿主在事件到达或 `due()` 到期时调用 `step()`，每次至多派发一个动作；目标完成必须由 `GoalEvaluator` 用宿主证据确认。只在世界出现事情时才需要行动的 Run 可以用 `idle: 'wait'` 启动：没有候选时等待状态变化，而不是请示。决策器会因限流或网络短暂失败的宿主用 `onDecisionError: 'wait'`，失败按无进展计数后才请人。只想旁听一个仍由人决定的宿主，用 `approval: 'advisory'`：只提案与预检，从不派发（`node examples/shadow-advisor.mjs`）。完整说明见 [托管运行时](docs/runtime.md)。
 
 ```ts
 import { IntentRuntime, HumanInbox } from '@cognitive-hub/core';
@@ -142,7 +142,7 @@ await migrate(pool);   // 幂等建表，表名前缀 cognitive_hub_
 const runtime = new IntentRuntime({ ...ports, journal: new PgJournal(pool), runs: new PgRunStore(pool) });
 ```
 
-离线测试用 PGlite（编译成 WebAssembly 的真 PostgreSQL）运行同一套一致性测试和验收链路。设置 `COGNITIVE_HUB_PG_URL` 并自行安装 `pg` 后，同一套测试会额外对真实服务器运行，连接串写进 `.env` 后也可用 `npm run test:pg`；CI 未接入真实服务器。
+离线测试用 PGlite（编译成 WebAssembly 的真 PostgreSQL）运行同一套一致性测试和验收链路。设置 `COGNITIVE_HUB_PG_URL` 后同一套测试会额外对真实服务器运行，连接串写进 `.env` 后也可用 `npm run test:pg`；CI 用 PostgreSQL 17 服务容器运行它。
 
 ## 决策记录与只读回放（可选）
 
@@ -185,6 +185,7 @@ const check = await reevaluate(await decisions.list({ tag: { key: 'runId', value
 | [架构决策 0010](docs/adr/0010-advisory-runs.md) | 旁路 Run：只提案与预检、从不派发，按宿主实际决定比较建议 |
 | [安全说明](SECURITY.md) | 为什么进程内插件不是沙箱 |
 | [路线图](docs/roadmap.md) | 从基础内核到真实宿主的验收条件 |
+| [v0.3 回归报告](docs/game-integration-v0.3.md) | 三个游戏的回归门槛结果，以及它们可以删掉的绕路 |
 
 ## 重要边界
 

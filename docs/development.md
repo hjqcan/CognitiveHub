@@ -18,7 +18,7 @@ node examples/shadow-advisor.mjs
 
 TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexedAccess、noUnusedLocals 和 noUnusedParameters。测试用 Node 原生 test runner，不需要 Jest/Vitest 或真实网络。
 
-开发依赖另有 PGlite 0.5.8：编译成 WebAssembly 的 PostgreSQL，用来离线运行 SQL 适配器的一致性测试，不进入运行时依赖。设置 `COGNITIVE_HUB_PG_URL` 并自行安装 `pg` 后，同一套测试会额外对真实服务器运行。把连接串写进 `.env`（见 `.env.example`）后可直接 `npm run test:pg`，它用 Node 自带的 `--env-file` 读取，不引入依赖；`migrate()` 会在目标库建 `cognitive_hub_*` 表，请指向一个专用测试库。
+开发依赖另有 PGlite 0.5.8（编译成 WebAssembly 的 PostgreSQL，离线运行 SQL 适配器的一致性测试）与 pg 8.23.0（node-postgres 驱动），都不进入运行时依赖。设置 `COGNITIVE_HUB_PG_URL` 后，同一套测试会额外对真实服务器运行；CI 用 PostgreSQL 17 服务容器这样做。把连接串写进 `.env`（见 `.env.example`）后可直接 `npm run test:pg`，它用 Node 自带的 `--env-file` 读取，不引入依赖；`migrate()` 会在目标库建 `cognitive_hub_*` 表，请指向一个专用测试库。
 
 ## 测试组织
 
@@ -29,6 +29,9 @@ TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexed
 | recovery.test.mjs | 新进程从导出 JSON 重建 journal 后只查询核对；空回执；版本/作用域不匹配阻塞；恢复记录持有租约；外部终态释放本地租约；两个实例并发核对的冲突收敛；查询失败；过期观测；unsettled |
 | restart.test.mjs | 真实两次进程：派发后退出，再启动后核对原任务，外部提交计数仍为 1 |
 | runtime.test.mjs | 托管运行时：一步一动作、目标先检查、模型 wait 与时间唤醒、事件去重、预算与修订、过期回应、每步批准、guidance 版本、stop/terminate/pause、租约、撤权拒绝、版本变化阻塞、幽灵操作清理、due、意图修订 |
+| runtime-idle.test.mjs | 空候选默认请示；`idle: 'wait'` 的 Run 等状态变化再行动；未变状态的定时唤醒计入无进展；Hub 直接返回空候选等待 |
+| v021-regressions.test.mjs | 停止恢复中修订预算或意图不会重新派发；acquire 检查插件版本；推理中批准或 Run 截止过期不派发；期限传到执行网关；事件唤醒 CAS 失败不消费、确认丢失时唤醒与去重键同在；通知在提交前不外发、确认失败重发同一 id、回应后取消待发通知；同租户同意图 id 可在不同完整作用域运行；旧事件回执迁入 |
+| v021-pg.test.mjs | schema v3 迁移保留旧事件回执且可重复运行；PostgreSQL 上唤醒失败不消费事件；outbox 投递成功但确认失败后重发同一问题 |
 | runtime-chain.test.mjs | v0.2 验收链路（进程内）：第一步完成 → 第二步回执丢失 → 快照重建 → 按键核对不重复 → 缺信息等人 → 补充后完成 |
 | runtime-kill.test.mjs | 真实 SIGKILL：worker 在派发中被杀，下一次 worker 按幂等键核对，外部提交计数不变，最终 completed |
 | store-conformance.mjs + stores.test.mjs | ExecutionJournal、RunStore 与 DecisionStore 的行为契约：claim 原子性、CAS、终态释放预留、一意图一未终态 Run、事件去重、`due` 的到期判定与排序、三种 `prune`、畸形记录拒绝、决策去重/回填/按 id 取回/按意图与标签查询；对内存实现和 PGlite 上的 PostgreSQL 实现各跑一遍，另测迁移幂等与锁冲突不留残余 |
@@ -61,6 +64,8 @@ TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexed
 
 ## 本次验证的含义
 
-离线测试证明本实现针对列出的输入和失败场景遵守相应契约，不证明现实机器人安全、在线模型正确率、硬实时性、跨进程互斥或跨机器 exactly-once。重启恢复只在“单进程、一份 journal 由一个 Hub 驱动、插件精确同版本”的前提下验证。
+离线测试证明本实现针对列出的输入和失败场景遵守相应契约，不证明现实机器人安全、在线模型正确率、硬实时性、跨进程互斥或跨机器 exactly-once。
 
-自动化工作流只运行类型检查、离线单元测试和模拟示例，不接触 API 密钥或实际设备。
+内核改动的升级门槛还包括真实消费者：三个游戏通过 `file:` 链接使用内核，每次改动后在各自仓库运行 `npm run check` 并与改动前的基线对比（v0.3 的记录见 `docs/game-integration-v0.3.md`）。重启恢复只在“单进程、一份 journal 由一个 Hub 驱动、插件精确同版本”的前提下验证。
+
+自动化工作流运行类型检查、离线单元测试（含对 PostgreSQL 17 服务容器的一致性测试）和模拟示例，不接触 API 密钥或实际设备。
