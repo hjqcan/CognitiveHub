@@ -238,6 +238,36 @@ export class PluginHost {
       signal?.addEventListener('abort', abort, { once: true });
     });
   }
+  /**
+   * Stop every active or draining plugin, dependents before the services they require, each round concurrently.
+   * Never throws for a plugin that fails: it is reported in `failed` with its code, and a plugin still holding on to it
+   * (a dependent left draining after its drain was aborted) makes the services it requires `skipped`.
+   * The signal bounds the drain waits exactly as it does for stop().
+   */
+  async stopAll(options: { readonly signal?: AbortSignal } = {}): Promise<{
+    readonly stopped: readonly string[]; readonly failed: readonly { readonly id: string; readonly code: string }[]; readonly skipped: readonly string[] }> {
+    ensure(!this.#starting, 'host-busy', 'Cannot stop during activation');
+    const live = (m: Mount): boolean => m.status === 'active' || m.status === 'draining' || m.status === 'starting';
+    const remaining = new Set([...this.#mounts.values()].filter(m => m.status === 'active' || m.status === 'draining'));
+    const stopped: string[] = [], failed: { id: string; code: string }[] = [], skipped: string[] = [];
+    const needs = (dependent: Mount, provider: Mount): boolean => dependent !== provider &&
+      (dependent.plugin.manifest.requires ?? []).some(key => (provider.plugin.manifest.provides ?? []).includes(key));
+    while (remaining.size) {
+      // Ready: nothing still running (in this batch or left behind by a failed stop) requires what it provides.
+      const holders = [...this.#mounts.values()].filter(m => remaining.has(m) || live(m));
+      const ready = [...remaining].filter(m => !holders.some(h => needs(h, m)));
+      if (!ready.length) { for (const m of remaining) skipped.push(m.plugin.manifest.id); break; }
+      const outcomes = await Promise.allSettled(ready.map(m => this.stop(m.plugin.manifest.id, options)));
+      ready.forEach((m, i) => {
+        remaining.delete(m);
+        const outcome = outcomes[i]!;
+        if (outcome.status === 'fulfilled') stopped.push(m.plugin.manifest.id);
+        else failed.push({ id: m.plugin.manifest.id, code: outcome.reason instanceof HubError ? outcome.reason.code
+          : outcome.reason instanceof AggregateError ? 'cleanup-failed' : 'stop-failed' });
+      });
+    }
+    return { stopped, failed, skipped };
+  }
   async #dispose(mount: Mount): Promise<void> {
     const errors: unknown[] = [];
     for (const dispose of mount.disposers.splice(0).reverse()) {

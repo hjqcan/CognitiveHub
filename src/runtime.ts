@@ -1,6 +1,7 @@
 import type { DeliberationRequest, ExecutionRecord, Guidance, Intent, Json, Observation, ProposalResult } from './contracts.js';
 import type {
-  Budget, DeliberationResponse, GoalEvaluator, RequestKind, Run, RunEvent, RunResult, RunSpec, RunStore, StepOutcome, StepResult, WaitCondition,
+  Budget, DeliberationResponse, DueStep, GoalEvaluator, RequestKind, Run, RunEvent, RunResult, RunSpec, RunStore, StepOutcome, StepResult,
+  WaitCondition,
 } from './run.js';
 import { dueRuns, runTerminal } from './run.js';
 import type { HubOptions } from './hub.js';
@@ -153,6 +154,30 @@ export class IntentRuntime {
     ensure(Number.isFinite(now), 'invalid-options', 'now must be a finite time');
     if (limit !== undefined) ensure(Number.isInteger(limit) && limit > 0, 'invalid-options', 'limit must be a positive integer');
     return this.runs.due ? this.runs.due(now, limit) : dueRuns(await this.runs.unsettled(), now, limit);
+  }
+
+  /**
+   * One pass over the runs that are due now, earliest first, stepping at most `concurrency` of them at a time.
+   * It never loops or sleeps: the host still decides when to call again. A step that throws is reported in its entry
+   * instead of failing the batch. An aborted signal stops new steps from starting and is passed to the running ones.
+   */
+  async stepDue(options: { readonly concurrency?: number; readonly limit?: number; readonly signal?: AbortSignal } = {}): Promise<readonly DueStep[]> {
+    const concurrency = options.concurrency ?? 1;
+    ensure(Number.isInteger(concurrency) && concurrency > 0, 'invalid-options', 'concurrency must be a positive integer');
+    const ids = await this.due(this.#now(), options.limit);
+    const results: (DueStep | undefined)[] = [];
+    const signal = options.signal;
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < ids.length && !signal?.aborted) {
+        const index = next++;
+        const runId = ids[index]!;
+        try { results[index] = { runId, result: await this.step(runId, signal ? { signal } : {}) }; }
+        catch (error) { results[index] = { runId, error }; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, worker));
+    return results.filter((r): r is DueStep => r !== undefined);
   }
 
   /** One bounded advance. Returns what the step ended with; the host decides when to call again. */

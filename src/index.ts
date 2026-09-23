@@ -6,6 +6,8 @@ export type { HubOptions } from './hub.js';
 export { IntentRuntime } from './runtime.js';
 export type { RuntimeOptions } from './runtime.js';
 export { PluginHost } from './plugins.js';
+export { DecisionLimiter, limitDecider } from './deciders.js';
+export type { DecisionLimiterOptions } from './deciders.js';
 export type { CapabilityLease } from './plugins.js';
 export { MemoryJournal, MemoryRunStore, MemoryDecisionStore, MemoryEvents, HumanInbox } from './memory.js';
 export { timeline, reevaluate } from './replay.js';

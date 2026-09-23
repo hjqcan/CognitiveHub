@@ -74,6 +74,8 @@ setup 结束后贡献窗口关闭。不要保留 ctx 在后台异步注册能力
 
 插件在异步 dispose 完成前持续处于 draining，其依赖提供者不能停止，也不能重新激活该插件。清理成功后才变为 stopped；清理失败进入 failed。`start()` 不会重试 failed 模块；用 `uninstall(pluginId)` 移除 installed/stopped/failed 的挂载后重新 install，才是显式的重试或替换路径。active/draining 的模块不能卸载。
 
+`stopAll({ signal })` 按依赖顺序停掉所有 active 与 draining 的插件：没有任何仍在运行的插件依赖它的先停，每一轮并发进行，所以一个慢的排空不会耗光后面插件的等待时间。它从不因为单个插件失败而抛错：失败的插件带码列在 `failed`，排空被中止而仍处于 draining 的插件继续持有它依赖的服务，这些服务列在 `skipped`，之后再调用一次即可。
+
 先核对/终结任务，再停用。不要在 dispose 中发送紧急停机、自动补偿或撤销用户业务操作。
 
 存在 active/draining 依赖者时，不能停止其服务提供者。相同版本重新激活也会增加 activation；此前提案不可继续用。首版不支持升级运行中的模块实例；`uninstall` 只移除挂载，不删除第三方包文件。

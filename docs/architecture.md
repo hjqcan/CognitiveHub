@@ -14,6 +14,7 @@
 | `pg.ts` | PostgreSQL 适配器（`./pg` 入口）：注入式 SQL 客户端、幂等 DDL、每个操作一条语句 |
 | `replay.ts` | 只读回放：按意图或 Run 生成时间线，用另一个决策器重评记录的请求；不构造 Hub |
 | `jev.ts` | TypeSafe `/v1/systemone` Choice 协议适配，不模拟聊天工具调用 |
+| `deciders.ts` | 多个 Run 共用决策器时的并发上限与调用预算（`DecisionLimiter`） |
 | `memory.ts` | 单进程日志（可导出、可从记录重建）、资源预留、人工收件箱、事件缓冲 |
 | `primitives.ts` | 不可变快照、JSON 校验、确定性序列化、截止时间、记录/回执形状校验、动作身份 |
 
@@ -72,6 +73,8 @@ MemoryJournal 的 claim 原子预留操作 ID 和资源；replace 是版本比�
 一次提案/操作不能并发提交两次。决策、预检、提交和验证有明确时间上限。超时只结束等待，不证明外部操作被取消。忽略 AbortSignal 的代码可能仍在运行；决策和预检的插件租约保留到实际回调结束，迟到的模型结果不会提交执行。
 
 插件开始 draining 后，新候选不可见；尚未派发的动作会被拒绝。在途执行继续保留 capability lease，使用既有 verifier/reconcile。执行记录终态和本地回调退出分别跟踪：记录终态后资源预留释放，但插件要等所有 execute/verify/reconcile 回调实际结束才可清理。迟到回调的结果不会覆盖已经记录的状态。
+
+多个 Run 或多个 Hub 共用一个决策器时，用 `limitDecider(inner, { concurrency, maxCalls })` 包一层：先进先出的并发上限，释放的槽位直接交给下一个等待者；槽位在被包装的调用真正结束时才释放，调用方超时放弃不算，因为被放弃的调用仍是一次真实的供应商请求；排队中被取消的调用离开队列、不花预算；预算在派发时计数，失败的调用也算；预算用完时直接返回 `deliberate`（`metadata.code: 'decision-budget'`），不再调用决策器。决策自带的 `provider` 保留，没有的补上被包装决策器的名字。每个意图同一时刻只有一轮 propose，由 Hub 保证，限流器不再重复这层保护。
 
 服务端口（decision/state/policy/deliberation）由应用保持存活。当前内核不会自动对 `plugins.resolve()` 返回的任意服务建立生命周期租约；应用应先停止调用/清空在途认知工作，再停止服务提供插件。不要声称所有服务都支持无感热替换。
 

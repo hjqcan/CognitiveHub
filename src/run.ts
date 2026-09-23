@@ -151,6 +151,10 @@ export interface StepResult {
   /** Machine-readable reason when the step ended through a failure or rejection path. */
   readonly code?: string;
 }
+/** One run handled by `IntentRuntime.stepDue()`: its step result, or the error that step threw. */
+export type DueStep =
+  | { readonly runId: string; readonly result: StepResult }
+  | { readonly runId: string; readonly error: unknown };
 export type RunResult =
   | { readonly kind: 'applied'; readonly run: Run }
   | { readonly kind: 'rejected'; readonly code: string; readonly reason: string };

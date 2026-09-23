@@ -134,6 +134,23 @@ type WaitCondition =
 
 所有权租约：`step()` 开始时写入 `{ owner, expiresAt }`，结束时释放。其他 owner 持有且未过期 → `lease-held`；过期可接管；**同一 owner 重启后直接接管自己的租约**，这就是单工作进程的崩溃恢复。这不是分布式调度，也不做公平性。
 
+## 8.5 托管多个 Run
+
+一个宿主往往同时推进许多 Run（浇给每局 8 个角色）。三件事以前每个游戏各写一遍，现在由内核提供，但调度权仍在宿主：
+
+- **`runtime.stepDue({ concurrency, limit?, signal? })`**：取当前到期的 Run（最早的在前），最多 `concurrency` 个同时 `step()`，推进一遍就返回，不循环也不休眠。每项是 `{ runId, result }` 或 `{ runId, error }`，一个 Run 抛错不影响其他 Run。signal 中止后不再启动新的步进，并传给正在运行的步进。`limit` 截断时按唤醒时间排序，刚推进过的 Run 自然排到后面，不会饿死。
+- **`limitDecider(inner, { concurrency, maxCalls?, name? })`**：多个 Run 共用一个决策器时的并发上限与调用预算，见 `docs/architecture.md` §5。
+- **`plugins.stopAll({ signal })`**：按依赖顺序停掉所有插件，见 `docs/plugins.md`。
+
+关停配方：
+
+```ts
+for (const run of await runtime.runs.unsettled()) await runtime.stop(run.id);
+await runtime.stepDue({ concurrency: 4 });                      // 核对在途操作，能结束的 Run 结束
+const { failed, skipped } = await plugins.stopAll({ signal: AbortSignal.timeout(1000) });
+// failed/skipped 非空：仍有在途回调或未终态操作持有插件，稍后再调用一次 stopAll
+```
+
 ## 9. 事件
 
 `run.started`、`run.stepped`（带 `decisionId`、`recordId`、`code`）、`run.waiting`、`run.woken`、`run.deliberating`、`run.dispatch.rejected`、`run.response.applied / rejected`、`run.paused`、`run.resumed`、`run.revised`、`run.stopping`、`run.completed / failed / stopped`、`run.event.duplicate / ignored`。只含 id、状态与原因码，不含业务数据。
@@ -141,7 +158,7 @@ type WaitCondition =
 ## 10. 边界
 
 - 没有后台循环、没有节拍器：宿主调度。
-- 一次只处理一个动作；并行分支需要多个 Run。
+- 一次只处理一个动作；并行分支需要多个 Run。多个 Run 用 `stepDue()` 按并发上限推进，共用的决策器用 `limitDecider()` 限流。
 - 一个 Run 同一时刻只由一个 worker 推进；跨进程互斥依赖租约与 CAS，不是队列。
 - 终止不等于回滚；没有 cancel 端口。
 - 内存存储不持久；持久化用 `./pg` 适配器，它同样不提供队列或公平调度。
