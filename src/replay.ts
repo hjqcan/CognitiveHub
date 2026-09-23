@@ -86,3 +86,56 @@ export async function reevaluate(records: readonly DecisionRecord[], provider: D
   }
   return results;
 }
+
+/** What the host actually did at the moment of one recorded decision: one of the bound candidates, or nothing. */
+export interface AdviceLabel {
+  readonly decisionId: string;
+  readonly actual: { readonly capability: string; readonly key: string } | null;
+}
+export interface AdviceComparison {
+  /** Labels that matched a recorded decision. */
+  readonly labelled: number;
+  /** The advice was the host's action, or advised no action when the host did nothing. */
+  readonly agreed: number;
+  readonly agreement: number | null;
+  /** Of the labels where the host acted, how often that action was among the bound candidates at all. */
+  readonly recall: number | null;
+  /** The host acted and the advice was a different action. */
+  readonly differed: number;
+  /** The host acted and the advice was to wait or ask, or there was nothing to decide. */
+  readonly abstained: number;
+  /** The host did nothing and the advice was to act. */
+  readonly overreach: number;
+  /** Decisions where the host's action was not a candidate: the capability adapters, not the decider, missed it. */
+  readonly missing: readonly { readonly decisionId: string; readonly actual: { readonly capability: string; readonly key: string } }[];
+  /** Label ids with no recorded decision. */
+  readonly unmatched: readonly string[];
+}
+/**
+ * Compare recorded advice with what the host actually did (phase A shadowing). Pure and read-only. Agreement measures the
+ * decider on the candidates it was given; recall measures the capability adapters. Neither says an action would have
+ * succeeded: advice that matches the host is not evidence of a verified effect.
+ */
+export function compareAdvice(records: readonly DecisionRecord[], labels: readonly AdviceLabel[]): AdviceComparison {
+  const byId = new Map(records.map(r => [r.id, r]));
+  const missing: { decisionId: string; actual: { capability: string; key: string } }[] = [];
+  const unmatched: string[] = [];
+  let labelled = 0, agreed = 0, acted = 0, recalled = 0, differed = 0, abstained = 0, overreach = 0;
+  for (const label of labels) {
+    const record = byId.get(label.decisionId);
+    if (!record) { unmatched.push(label.decisionId); continue; }
+    labelled++;
+    const candidates = record.request?.candidates ?? [];
+    const chosen = record.decision?.kind === 'action' ? candidates.find(c => c.id === (record.decision as { candidateId: string }).candidateId) : undefined;
+    const actual = label.actual;
+    if (actual === null) { if (chosen) overreach++; else agreed++; continue; }
+    acted++;
+    if (candidates.some(c => c.capability === actual.capability && c.key === actual.key)) recalled++;
+    else missing.push({ decisionId: label.decisionId, actual });
+    if (chosen && chosen.capability === actual.capability && chosen.key === actual.key) agreed++;
+    else if (chosen) differed++;
+    else abstained++;
+  }
+  return { labelled, agreed, agreement: labelled ? agreed / labelled : null, recall: acted ? recalled / acted : null,
+    differed, abstained, overreach, missing, unmatched };
+}

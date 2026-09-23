@@ -20,7 +20,12 @@ export interface Budget {
   readonly maxNoProgress: number;
   readonly deadlineAt: number | null;
 }
-export type ApprovalMode = 'automatic' | 'each-action';
+/**
+ * `automatic` dispatches what the decider chose; `each-action` asks the host before every dispatch; `advisory` never
+ * dispatches: each step proposes, previews the action (fresh observation, execute-phase policy, validate, check, all
+ * side-effect free) and records the advice, for shadowing a host that keeps doing the real work.
+ */
+export type ApprovalMode = 'automatic' | 'each-action' | 'advisory';
 /**
  * What a step does when no capability offers a candidate. `deliberate` (default) asks the host, which is right when
  * an empty set means a missing plugin or authorization. `wait` registers a state + time wait instead, for runs that
@@ -142,7 +147,9 @@ export function dueRuns(runs: readonly Run[], now: number, limit?: number): read
     .sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return (limit === undefined ? rows : rows.slice(0, limit)).map(row => row.id);
 }
-export type StepOutcome = 'idle' | 'lease-held' | 'waiting' | 'executed' | 'rejected' | 'deliberating' | 'completed' | 'failed' | 'stopped';
+export type StepOutcome = 'idle' | 'lease-held' | 'waiting' | 'executed' | 'rejected' | 'deliberating' | 'completed' | 'failed' | 'stopped'
+  /** Advisory runs only: the step proposed and previewed an action without dispatching it. */
+  | 'advised';
 export interface StepResult {
   readonly run: Run;
   readonly outcome: StepOutcome;
@@ -150,7 +157,7 @@ export interface StepResult {
   readonly decisionId?: string;
   /** The journal record this step dispatched, or the one whose recovery blocked it. */
   readonly recordId?: string;
-  /** Machine-readable reason when the step ended through a failure or rejection path. */
+  /** Machine-readable reason when the step ended through a failure or rejection path, or an advised action's preview was refused. */
   readonly code?: string;
 }
 /** One run handled by `IntentRuntime.stepDue()`: its step result, or the error that step threw. */

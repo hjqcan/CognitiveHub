@@ -23,6 +23,18 @@ RMS 任务受阻节点
 2. 返回受理句柄，能按句柄或幂等键查询未知结果。
 3. 提供可以核验实际效果的数据，不仅是“请求已收到”。
 
+### 阶段 A：旁路接入
+
+先只读、不派发。步骤：
+
+1. 写一个只读的 StateProvider，把平台上的真实异常整理成 Observation：只放任务相关、已批准的数据，区分观测、报告和未知。
+2. 能力插件照常实现 `prepare`、`validate`、`check`，`execute` 可以直接抛错；旁路模式从不调用它。
+3. 用 `approval: 'advisory'`、`idle: 'wait'` 启动 Run，配置 `decisions` 存储。平台出现事件时 `deliver()` 或直接 `step()`。
+4. 平台照常由人或原逻辑处理。在每个 `advised` 或 `waiting` 步进的 `decisionId` 上，记下平台实际做了什么：`{ decisionId, actual: { capability, key } | null }`。
+5. 用 `compareAdvice()` 或 `scripts/replay.mjs --labels` 看一致率、召回率和召回失败的决策。召回低先改能力适配器，一致率低再看决策器与 guidance。
+
+验收口径：Hub 关闭时平台照常工作；敏感数据和权限不进入模型；“建议合理”不等于“执行一定成功”，旁路阶段没有任何执行证据。
+
 ## 人形机器人
 
 同一内核，替换 StateProvider 和能力插件。感知、定位、导航、操作规划与安全由机器人原有系统完成。

@@ -124,7 +124,8 @@ export class IntentRuntime {
     // The same check propose() applies: an intent that fails it here would fail every later step instead.
     assertIntent(spec.intent);
     const intent = immutable(spec.intent);
-    ensure(spec.approval === 'automatic' || spec.approval === 'each-action', 'invalid-run', 'approval must be automatic or each-action');
+    ensure(spec.approval === 'automatic' || spec.approval === 'each-action' || spec.approval === 'advisory', 'invalid-run',
+      'approval must be automatic, each-action or advisory');
     if (spec.guidance !== undefined) assertGuidance(spec.guidance);
     const waitMs = spec.waitMs ?? this.#waitMs;
     ensure(Number.isInteger(waitMs) && waitMs > 0, 'invalid-run', 'waitMs must be a positive integer');
@@ -284,6 +285,13 @@ export class IntentRuntime {
         : false;
       if (!draft.run.wait.some(holds)) return 'waiting';
       const progressed = draft.run.wait.some(c => c.kind !== 'time' && holds(c));
+      // An advisory run has already advised on this state; a bare time bound re-arms the wait instead of asking again,
+      // so shadowing a quiet host neither spends decisions nor accumulates no-progress. A passed deadline still ends it.
+      const deadline = draft.run.budget.deadlineAt;
+      if (draft.run.approval === 'advisory' && !progressed && (deadline === null || this.#now() < deadline)) {
+        await save({ wait: [{ kind: 'state', version: observation.version }, { kind: 'time', at: now + draft.run.waitMs }], lease: null });
+        return 'waiting';
+      }
       const counters = draft.run.counters;
       // Staged like the goal's fields below; if the goal throws, step()'s lease release persists it as before.
       this.#stage(draft, { status: 'active', wait: [], counters: progressed ? counters : { ...counters, noProgress: counters.noProgress + 1 } });
@@ -355,8 +363,10 @@ export class IntentRuntime {
       // Recheck the Run deadline after every slow decision; hub.execute enforces it again after preflight/claim.
       if (budget.deadlineAt !== null && this.#now() >= budget.deadlineAt)
         return this.#deliberate(draft, 'budget', 'The run deadline has passed', { deadlineAt: budget.deadlineAt }, proposal.stateVersion);
-      // 8. Approval gate: an approval names one action digest at one state version and is spent by use.
       const { action } = proposal;
+      // Advisory: preview and record the advice; nothing is claimed, reserved or dispatched.
+      if (draft.run.approval === 'advisory') return await this.#advise(draft, proposal, observation, now, hubSignal);
+      // 8. Approval gate: an approval names one action digest at one state version and is spent by use.
       const digest = actionDigest(action);
       if (draft.run.approval === 'each-action') {
         const approved = draft.run.approved;
@@ -394,6 +404,21 @@ export class IntentRuntime {
       // The runtime owns this proposal; persisted executions are recovered from the journal.
       this.hub.discard(proposal.id);
     }
+  }
+  /**
+   * The advisory end of a step: a dry-run execute re-observes, checks the execute-phase policy, validates and runs the
+   * capability's side-effect-free check. Its refusal code, if any, is the step's code. The run then waits for the state.
+   */
+  async #advise(draft: Draft, proposal: Extract<ProposalResult, { kind: 'proposal' }>, observation: Observation, now: number,
+    hubSignal: { signal?: AbortSignal }): Promise<StepOutcome> {
+    const preview = await this.hub.execute(proposal.id, `${draft.run.id}/advice/${draft.run.counters.decisions}`, { ...hubSignal });
+    if (preview.kind === 'rejected') draft.code = preview.code;
+    draft.run = await this.#save(draft.run, { status: 'waiting', lease: null,
+      wait: [{ kind: 'state', version: observation.version }, { kind: 'time', at: now + draft.run.waitMs }],
+      counters: this.#count(draft.run.counters, canonical([observation.version, proposal.action.id])) });
+    this.#emit('run.advised', { runId: draft.run.id, decisionId: proposal.decisionId ?? null, capability: proposal.action.capability,
+      actionId: proposal.action.id, preview: preview.kind === 'rejected' ? preview.code : null });
+    return 'advised';
   }
   /** Waiting on state or time only, nothing open, no lease to clear and no time bound reached: nothing to reconcile. */
   #quiet(run: Run, now: number): boolean {

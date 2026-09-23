@@ -13,6 +13,7 @@ npm test
 npm run demo
 node examples/digital-workspace.mjs
 d=$(mktemp -d) && node examples/restart-recovery.mjs "$d" submit && node examples/restart-recovery.mjs "$d" recover
+node examples/shadow-advisor.mjs
 ```
 
 TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexedAccess、noUnusedLocals 和 noUnusedParameters。测试用 Node 原生 test runner，不需要 Jest/Vitest 或真实网络。
@@ -33,6 +34,7 @@ TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexed
 | store-conformance.mjs + stores.test.mjs | ExecutionJournal、RunStore 与 DecisionStore 的行为契约：claim 原子性、CAS、终态释放预留、一意图一未终态 Run、事件去重、`due` 的到期判定与排序、三种 `prune`、畸形记录拒绝、决策去重/回填/按 id 取回/按意图与标签查询；对内存实现和 PGlite 上的 PostgreSQL 实现各跑一遍，另测迁移幂等与锁冲突不留残余 |
 | decisions.test.mjs | 决策记录：考虑/排除/请求/决策/回填执行记录；无候选与决策器失败的记录；审计存储失败不改变结果；tags 校验 |
 | replay.test.mjs | 运行时决策记录带 runId；时间线顺序；用不同决策器重评的一致/不一致/失败；CLI 从导出 JSON 打印时间线且不派发任何动作 |
+| advisory.test.mjs | 旁路 Run 只提案与预检：不 claim、不占资源、不派发，同一资源仍可被行动的 Run 使用；预检拒绝码成为步进码；安静宿主不花决策与无进展，截止时间仍生效；compareAdvice 的一致、不同、弃权、越权、召回与未匹配；示例与 CLI 给出同样的比较 |
 | retention.test.mjs | runtime.prune 在内存与 PGlite 上删除已结束 Run、其记录与旧决策记录，保留活跃 Run 引用的全部记录且之后照常推进；不支持清理的存储返回 null；recordFacts 关闭时只丢观测事实 |
 | multi-run.test.mjs | 限流器在飞数不超过并发、先进先出、调用方放弃不提前释放槽位、排队中取消不花预算、预算计数与耗尽后请示、调高后恢复、provider 透传；stepDue 按唤醒时间排序、并发与 limit、不饿死、错误隔离、signal；8 个 Run 共用预算与并发 2；stopAll 的依赖顺序与排空中止后的跳过 |
 | text-limits.test.mjs | 目标、能力描述、候选描述、决策理由、回执理由、终止理由六处 4096 通过、4097 拒绝；标识符仍 512；600 字候选描述到达决策器；start/revise 与 propose 用同一意图校验；新长度的记录可导入 |

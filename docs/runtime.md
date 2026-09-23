@@ -21,7 +21,7 @@ for (const id of await runtime.due()) await runtime.step(id);
 
 | 对象 | 内容 |
 | --- | --- |
-| `RunSpec` | `intent`、`budget`、`approval`（必填：`automatic` 或 `each-action`）、可选 `guidance`、`waitMs`、`idle`（空候选时 `deliberate` 请示或 `wait` 等待，默认 `deliberate`）、`onDecisionError`（决策阶段失败时 `deliberate` 请示或 `wait` 定时重试，默认 `deliberate`） |
+| `RunSpec` | `intent`、`budget`、`approval`（必填：`automatic`、`each-action` 或 `advisory`，见 §5.5）、可选 `guidance`、`waitMs`、`idle`（空候选时 `deliberate` 请示或 `wait` 等待，默认 `deliberate`）、`onDecisionError`（决策阶段失败时 `deliberate` 请示或 `wait` 定时重试，默认 `deliberate`） |
 | `Run` | 意图快照、guidance、预算、状态、`operations`（派发过的 journal 记录 id）、`settled`（已确认终态的前缀长度，见 §3）、`wait`、当前 `request`、`approved`、`answers`、`counters`、`progress`、`outcome`、`lease`、CAS 用的 `revision` |
 | `Budget` | `maxDecisions`、`maxActions`、`maxNoProgress`、`deadlineAt` |
 | `Guidance` | 带版本的人类判断标准：`criteria`、`escalate`、`author`。只作为数据进入 `DecisionRequest.guidance`，Jev 适配器放进 `state.guidance`。**它不是 `Policy`**：不能放宽授权，也不能替代它 |
@@ -59,7 +59,7 @@ deliberating ──→ active   有效回应被应用；terminate 回应 → sto
 9. `each-action` 模式下核对批准（见 §5）。
 10. 先把 operationId 与 `actions + 1` 写入 Run，再 `hub.execute(..., { live: true })`。派发被拒绝（撤权、状态变化、资源占用）→ 从 `operations` 移除，`noProgress + 1`，返回 `rejected`。记录未终态 → `waiting`；已终态 → `executed`。运行时在 finally 中释放自己创建的提案，包括被拒绝、请求批准和异常路径；执行恢复依靠 journal，不依赖提案继续驻留。所有权租约的释放并入本步最后一次写入；只有“已派发且已终态”的路径保留单独的释放写入，因为 operationId 在派发前写入，提前释放会让别的 worker 把尚未 claim 的 id 当成幽灵删除。
 
-`StepResult.outcome` 取值：`idle`（终态或 paused）、`lease-held`、`waiting`、`executed`、`rejected`、`deliberating`、`completed`、`failed`、`stopped`。
+`StepResult.outcome` 取值：`idle`（终态或 paused）、`lease-held`、`waiting`、`executed`、`rejected`、`deliberating`、`completed`、`failed`、`stopped`，以及旁路 Run 的 `advised`。
 
 `StepResult` 还说明这一步做了什么，宿主不必比对前后的 `operations`：`decisionId` 是本步 propose 的决策轮次（配置了 `decisions` 时可用 `DecisionStore.get()` 取回记录），`recordId` 是本步派发的执行记录或恢复受阻的那条记录，`code` 是失败或被拒绝时的机器可读原因（派发拒绝码、恢复受阻码、决策失败码）。没有发生的事就没有对应字段。
 
@@ -104,6 +104,14 @@ type WaitCondition =
 | `terminate` | 终止；有在途操作先 `stopping`，核对到终态后 `stopped` |
 
 共同门控：`requestId` 必须等于当前开放请求，`intentRevision` 必须等于 Run 的意图修订，否则 `stale-response` 且 Run 不变。回应者的身份和权限由宿主在调用 `respond()` 之前认证；运行时看不到凭据。
+
+## 5.5 旁路模式
+
+`approval: 'advisory'` 的 Run 用来旁听一个仍由人或原平台做决定的宿主（路线图阶段 A）。它照常核对、观测、验收、检查预算、propose，然后只做一次 `hub.execute(..., { live: false })` 预检：重新观测、execute 阶段的策略、validate、能力的无副作用 check。它从不 claim、不占资源、不调用 execute，`operations` 保持为空，所以同一资源可以同时被真正行动的 Run 使用。
+
+- 每次建议的步进返回 `advised`，带 `decisionId`；预检被拒绝时 `code` 是拒绝码（例如 `policy-rejected`），这正是“宿主会不会拒绝这个动作”的证据。事件 `run.advised`。
+- 建议后登记 `[state, time]` 等待。只因时间界到期、状态版本没变时，重新挂起等待，不调用决策器、不计无进展：宿主安静时旁听不花预算。截止时间仍然有效。
+- 宿主记录自己在每个决策时刻实际做了什么（能力 + 候选 key，或什么都没做），`compareAdvice(records, labels)` 给出一致率、候选召回率（实际动作是否在候选里）、不同、弃权、越权次数和召回失败的决策。召回衡量能力适配器，一致率衡量决策器，两者都不说明动作执行后会成功。`node scripts/replay.mjs <dir> --labels <file>` 对导出的记录做同样的比较，示例见 `examples/shadow-advisor.mjs`。
 
 ## 6. 预算与无进展
 

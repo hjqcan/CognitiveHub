@@ -182,6 +182,7 @@ const check = await reevaluate(await decisions.list({ tag: { key: 'runId', value
 | [架构决策 0007](docs/adr/0007-step-cost.md) | 单步开销与 Run 历史无关：终态游标、到期查询、安静检查、观测复用 |
 | [架构决策 0008](docs/adr/0008-decisions-and-text.md) | 决策失败的等待策略、单步可追溯、自由文本上限、Jev 内置选项 |
 | [架构决策 0009](docs/adr/0009-hosting-and-retention.md) | 多 Run 宿主的限流与关停、记录保留与清理的边界 |
+| [架构决策 0010](docs/adr/0010-advisory-runs.md) | 旁路 Run：只提案与预检、从不派发，按宿主实际决定比较建议 |
 | [安全说明](SECURITY.md) | 为什么进程内插件不是沙箱 |
 | [路线图](docs/roadmap.md) | 从基础内核到真实宿主的验收条件 |
 
