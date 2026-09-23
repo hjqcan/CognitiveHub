@@ -104,10 +104,32 @@ export interface DecisionRequest {
   /** Present when the host or the managed runtime supplies judgment criteria. Cannot widen what Policy allows. */
   readonly guidance?: Guidance;
 }
+/**
+ * `provider` names who actually decided when a DecisionProvider routes or wraps others (a router, a rule, a budget guard).
+ * The decision record uses it instead of the configured provider's name.
+ */
 export type Decision =
-  | { readonly kind: 'action'; readonly candidateId: string; readonly metadata?: Json }
-  | { readonly kind: 'wait'; readonly reason: string; readonly metadata?: Json }
-  | { readonly kind: 'deliberate'; readonly reason: string; readonly metadata?: Json };
+  | { readonly kind: 'action'; readonly candidateId: string; readonly metadata?: Json; readonly provider?: string }
+  | { readonly kind: 'wait'; readonly reason: string; readonly metadata?: Json; readonly provider?: string }
+  | { readonly kind: 'deliberate'; readonly reason: string; readonly metadata?: Json; readonly provider?: string };
+/** Where a propose() turn was when it ended: gathering state, binding candidates, applying policy, deciding, or creating the proposal. */
+export type TurnPhase = 'observe' | 'prepare' | 'policy' | 'decide' | 'commit';
+/**
+ * Why a turn asked for deliberation. Carried as `DeliberationRequest.subject` with `kind: 'decision'`.
+ * A type alias rather than an interface so that it is assignable to Json.
+ */
+export type DecisionSubject = {
+  /** no-candidates: nothing authorized and applicable; decider-asked: the decider chose to ask; failed: the turn failed. */
+  readonly cause: 'no-candidates' | 'decider-asked' | 'failed';
+  readonly code: string | null;
+  readonly phase: TurnPhase;
+  readonly decisionId: string;
+  /** Drafts prepared across all requested capabilities, before policy. */
+  readonly considered: number;
+  /** Action ids the policy allowed this turn. */
+  readonly candidates: readonly string[];
+  readonly excluded: readonly { readonly actionId: string; readonly reason: string }[];
+};
 export interface DecisionProvider {
   readonly name: string;
   decide(request: DecisionRequest, signal: AbortSignal): Promise<Decision>;
@@ -138,11 +160,13 @@ export interface DeliberationProvider {
   /** At-least-once delivery: deduplicate by request.id. The host authenticates responses and reproposes against fresh state. */
   request(request: DeliberationRequest): Promise<void>;
 }
+/** `decisionId` names the turn (and its DecisionRecord when a store is configured); absent only when another turn was already in flight. */
 export type ProposalResult =
   | { readonly kind: 'proposal'; readonly id: string; readonly action: BoundAction;
-      readonly expiresAt: number; readonly decision: Decision; readonly stateVersion: string }
-  | { readonly kind: 'wait'; readonly reason: string }
-  | { readonly kind: 'deliberation'; readonly request: DeliberationRequest };
+      readonly expiresAt: number; readonly decision: Decision; readonly stateVersion: string; readonly decisionId?: string }
+  /** `code` is set when the wait comes from a failure path (for example `aborted`), like DecisionRecord.code. */
+  | { readonly kind: 'wait'; readonly reason: string; readonly code?: string; readonly decisionId?: string }
+  | { readonly kind: 'deliberation'; readonly request: DeliberationRequest; readonly decisionId?: string };
 export type ExecutionStatus = 'submitted' | 'pending' | 'unknown' | 'verified' | 'failed';
 export interface ExecutionRecord {
   readonly id: string;
@@ -203,6 +227,8 @@ export interface DecisionRecord {
   readonly outcome: 'proposal' | 'wait' | 'deliberation';
   /** Error code when the turn ended through a failure path, else null. */
   readonly code: string | null;
+  /** Where the turn ended. Absent in records written before v0.3. */
+  readonly phase?: TurnPhase | null;
   readonly proposalId: string | null;
   readonly requestId: string | null;
   /** Journal record produced from the proposal; linked when execution claims it. */
@@ -212,6 +238,8 @@ export interface DecisionRecord {
 export interface DecisionStore {
   append(record: DecisionRecord): Promise<void>;
   link(id: string, recordId: string): Promise<void>;
+  /** Optional: one record by id, for hosts that follow a StepResult's or ProposalResult's decisionId. */
+  get?(id: string): Promise<DecisionRecord | undefined>;
   /** Ascending by createdAt; limit keeps the earliest matches. */
   list(query?: { readonly intentId?: string; readonly tag?: { readonly key: string; readonly value: string }; readonly limit?: number }):
     Promise<readonly DecisionRecord[]>;

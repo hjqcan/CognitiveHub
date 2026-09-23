@@ -61,6 +61,8 @@ deliberating ──→ active   有效回应被应用；terminate 回应 → sto
 
 `StepResult.outcome` 取值：`idle`（终态或 paused）、`lease-held`、`waiting`、`executed`、`rejected`、`deliberating`、`completed`、`failed`、`stopped`。
 
+`StepResult` 还说明这一步做了什么，宿主不必比对前后的 `operations`：`decisionId` 是本步 propose 的决策轮次（配置了 `decisions` 时可用 `DecisionStore.get()` 取回记录），`recordId` 是本步派发的执行记录或恢复受阻的那条记录，`code` 是失败或被拒绝时的机器可读原因（派发拒绝码、恢复受阻码、决策失败码）。没有发生的事就没有对应字段。
+
 ## 4. 等待与唤醒
 
 ```ts
@@ -85,7 +87,7 @@ type WaitCondition =
 
 | kind | 何时 | subject |
 | --- | --- | --- |
-| `decision` | 没有候选、模型选择 ask、或内核决策失败 | `null` |
+| `decision` | 没有候选、模型选择 ask、或内核决策失败 | `DecisionSubject`：`cause`（`no-candidates` / `decider-asked` / `failed`）、`code`、`phase`（`observe` / `prepare` / `policy` / `decide` / `commit`，本轮结束的位置）、`decisionId`、`considered`（策略前的草案数）、`candidates`（策略允许的动作 id）、`excluded`（被策略排除的动作与原因）。v0.3 之前停下的 Run 为 `null` |
 | `approval` | `each-action` 模式下派发前 | 动作 digest、状态版本、能力、参数、资源 |
 | `budget` / `no-progress` | 预算耗尽 / 重复无进展 | 计数 |
 | `recovery` | 重启后找不到兼容的能力实现 | 记录 id 与原因码 |
@@ -132,7 +134,7 @@ type WaitCondition =
 
 ## 9. 事件
 
-`run.started`、`run.stepped`、`run.waiting`、`run.woken`、`run.deliberating`、`run.dispatch.rejected`、`run.response.applied / rejected`、`run.paused`、`run.resumed`、`run.revised`、`run.stopping`、`run.completed / failed / stopped`、`run.event.duplicate / ignored`。只含 id、状态与原因码，不含业务数据。
+`run.started`、`run.stepped`（带 `decisionId`、`recordId`、`code`）、`run.waiting`、`run.woken`、`run.deliberating`、`run.dispatch.rejected`、`run.response.applied / rejected`、`run.paused`、`run.resumed`、`run.revised`、`run.stopping`、`run.completed / failed / stopped`、`run.event.duplicate / ignored`。只含 id、状态与原因码，不含业务数据。
 
 ## 10. 边界
 

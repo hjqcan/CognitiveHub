@@ -85,6 +85,7 @@ const SQL = {
   markEvent: `INSERT INTO cognitive_hub_run_events (run_id, key) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING run_id`,
   appendDecision: `INSERT INTO cognitive_hub_decisions (id, tenant, intent_id, created_at, data)
     VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (id) DO NOTHING RETURNING id`,
+  decision: `SELECT data FROM cognitive_hub_decisions WHERE id = $1`,
   linkDecision: `UPDATE cognitive_hub_decisions SET data = jsonb_set(data, '{recordId}', to_jsonb($2::text)) WHERE id = $1 RETURNING id`,
   listDecisions: `SELECT data FROM cognitive_hub_decisions
     WHERE ($1::text IS NULL OR intent_id = $1) AND ($2::jsonb IS NULL OR data -> 'tags' @> $2::jsonb)
@@ -216,6 +217,11 @@ export class PgDecisionStore implements DecisionStore {
     const { rows } = await this.#sql.query(SQL.appendDecision,
       [record.id, record.scope[0] ?? '', record.intentId, record.createdAt, JSON.stringify(record)]);
     ensure(rows.length === 1, 'duplicate-decision', `Duplicate decision ${record.id}`);
+  }
+  async get(id: string): Promise<DecisionRecord | undefined> {
+    const { rows } = await this.#sql.query(SQL.decision, [id]);
+    const row = rows[0];
+    return row ? this.#decision(row.data) : undefined;
   }
   async link(id: string, recordId: string): Promise<void> {
     identifier(id, 'decision id'); identifier(recordId, 'record id');

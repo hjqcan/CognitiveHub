@@ -129,9 +129,10 @@ export class JevDecisionProvider implements DecisionProvider {
         reportedProbabilityMass: mass,
         usage: { inputTokens: usage.input_tokens as number, outputTokens: usage.output_tokens as number },
         latencyMs: performance.now() - started };
-      if (chosen === 'wait') return { kind: 'wait', reason: 'Waiting for external progress', metadata };
-      if (chosen === 'ask') return { kind: 'deliberate', reason: 'No suitable action or more deliberation required', metadata };
-      return { kind: 'action', candidateId: ids.get(chosen)!, metadata };
+      const provider = this.name;
+      if (chosen === 'wait') return { kind: 'wait', reason: 'Waiting for external progress', metadata, provider };
+      if (chosen === 'ask') return { kind: 'deliberate', reason: 'No suitable action or more deliberation required', metadata, provider };
+      return { kind: 'action', candidateId: ids.get(chosen)!, metadata, provider };
     });
   }
 }

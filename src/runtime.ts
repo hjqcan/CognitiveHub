@@ -19,7 +19,14 @@ export interface RuntimeOptions extends HubOptions {
   leaseMs?: number;
   waitMs?: number;
 }
-interface Draft { run: Run; observation: Observation | null }
+interface Draft {
+  run: Run;
+  observation: Observation | null;
+  /** What this step did, reported through StepResult. Set only when known (exactOptionalPropertyTypes). */
+  decisionId?: string;
+  recordId?: string;
+  code?: string;
+}
 const field = (value: Json | undefined, key: string): Json | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as { readonly [key: string]: Json })[key] : undefined;
 const intentKey = (intent: Intent): string => canonical([intent.scope, intent.id]);
@@ -175,8 +182,10 @@ export class IntentRuntime {
           try { draft.run = await this.#save(draft.run, { lease: null }); } catch { /* an unreleased lease simply expires */ }
         }
       }
-      this.#emit('run.stepped', { runId: id, outcome, status: draft.run.status });
-      return { run: draft.run, outcome };
+      this.#emit('run.stepped', { runId: id, outcome, status: draft.run.status,
+        decisionId: draft.decisionId ?? null, recordId: draft.recordId ?? null, code: draft.code ?? null });
+      return { run: draft.run, outcome, ...(draft.decisionId !== undefined ? { decisionId: draft.decisionId } : {}),
+        ...(draft.recordId !== undefined ? { recordId: draft.recordId } : {}), ...(draft.code !== undefined ? { code: draft.code } : {}) };
     });
   }
 
@@ -197,8 +206,10 @@ export class IntentRuntime {
       if (record && !terminal(record.status)) {
         const result = await this.hub.reconcile(recordId, hubSignal);
         if (result.kind === 'record') record = result.record;
-        else if (result.kind === 'rejected' && (result.code === 'unavailable-capability' || result.code === 'plugin-version-mismatch'))
+        else if (result.kind === 'rejected' && (result.code === 'unavailable-capability' || result.code === 'plugin-version-mismatch')) {
+          draft.recordId = recordId; draft.code = result.code;
           return this.#deliberate(draft, 'recovery', result.reason, { recordId, code: result.code }, null);
+        }
         // Other rejections (busy, reconcile-failed, journal-conflict) leave the record open; the wait retries.
       }
       if (record) records.set(recordId, record);
@@ -273,15 +284,21 @@ export class IntentRuntime {
           ...(draft.run.idle === 'wait' ? { onEmpty: 'wait' as const } : {}) });
     }
     finally { this.#stepping.delete(key); }
+    if (proposal.decisionId !== undefined) draft.decisionId = proposal.decisionId;
     if (proposal.kind === 'wait') {
+      if (proposal.code !== undefined) draft.code = proposal.code;
       await save({ status: 'waiting', wait: [{ kind: 'state', version: observation.version }, { kind: 'time', at: now + draft.run.waitMs }],
         counters: this.#count(draft.run.counters, canonical([observation.version, 'wait'])), lease: null });
       this.#emit('run.waiting', { runId: draft.run.id, reason: proposal.reason });
       return 'waiting';
     }
     if (proposal.kind === 'deliberation') {
+      // The hub's structured subject says why (no candidates, the decider asked, or which phase failed with which code).
+      const subject = proposal.request.subject ?? null;
+      const failed = field(subject ?? null, 'cause') === 'failed' ? field(subject ?? null, 'code') : undefined;
+      if (typeof failed === 'string') draft.code = failed;
       return this.#parkRequest(draft, 'decision', immutable({ ...proposal.request,
-        runId: draft.run.id, kind: 'decision', subject: null }));
+        runId: draft.run.id, kind: 'decision', subject }));
     }
     try {
       // Recheck the Run deadline after every slow decision; hub.execute enforces it again after preflight/claim.
@@ -310,12 +327,14 @@ export class IntentRuntime {
       const execution = await this.hub.execute(proposal.id, operationId, { live: true, ...hubSignal,
         ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}) });
       if (execution.kind === 'rejected') {
+        draft.code = execution.code;
         this.#emit('run.dispatch.rejected', { runId: draft.run.id, code: execution.code });
         const c = draft.run.counters;
         await save({ operations: draft.run.operations.filter(x => x !== recordId), counters: { ...c, noProgress: c.noProgress + 1 }, lease: null });
         return 'rejected';
       }
       ensure(execution.kind === 'record', 'invalid-execution', 'Live execution cannot return a preview');
+      draft.recordId = recordId;
       // The executed path keeps the lease until step() releases it: the operation id was written before dispatch.
       if (terminal(execution.record.status)) return 'executed';
       await save({ status: 'waiting', wait: this.#waitFor(draft.run, [recordId], now), lease: null });

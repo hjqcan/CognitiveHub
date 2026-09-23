@@ -133,6 +133,7 @@ export class MemoryDecisionStore implements DecisionStore {
     ensure(current, 'unknown-decision', `Unknown decision ${id}`);
     this.#records.set(id, immutable({ ...current, recordId }));
   }
+  async get(id: string): Promise<DecisionRecord | undefined> { return this.#records.get(id); }
   async list(query: { readonly intentId?: string; readonly tag?: { readonly key: string; readonly value: string }; readonly limit?: number } = {}):
     Promise<readonly DecisionRecord[]> {
     const rows = [...this.#records.values()]

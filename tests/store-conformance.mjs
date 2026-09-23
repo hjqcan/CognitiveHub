@@ -160,6 +160,10 @@ export function decisionStoreConformance(name, store) {
     await s.link(d.id, 'record-1');
     assert.equal((await s.list({ intentId: d.intentId })).find(x => x.id === d.id).recordId, 'record-1');
     await assert.rejects(s.link('missing', 'record-1'), { code: 'unknown-decision' });
+    if (s.get) {                                          // optional lookup by id
+      assert.deepEqual(await s.get(d.id), { ...d, recordId: 'record-1' });
+      assert.equal(await s.get(unique('missing')), undefined);
+    }
   });
   test(`${name}: list filters by intent and tag, in time order, with a limit`, async () => {
     const s = await store(); const intentId = unique('intent'), runId = unique('run');

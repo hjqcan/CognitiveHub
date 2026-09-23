@@ -36,7 +36,8 @@ export async function timeline(
         (d.code ? `; code ${d.code}` : ''),
       detail: { intentId: d.intentId, intentRevision: d.intentRevision, tags: d.tags, observationVersion: d.observationVersion,
         guidanceVersion: d.guidanceVersion, notRequested: d.notRequested, considered: d.considered, excluded: d.excluded, candidates,
-        decision: d.decision, code: d.code, proposalId: d.proposalId, requestId: d.requestId, recordId: d.recordId } });
+        decision: d.decision, code: d.code, phase: d.phase ?? null, provider: d.provider,
+        proposalId: d.proposalId, requestId: d.requestId, recordId: d.recordId } });
     if (d.recordId === null) continue;
     const r = await stores.journal.get(d.recordId);
     if (!r) continue;

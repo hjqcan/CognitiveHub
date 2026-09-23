@@ -134,7 +134,16 @@ export function dueRuns(runs: readonly Run[], now: number, limit?: number): read
   return (limit === undefined ? rows : rows.slice(0, limit)).map(row => row.id);
 }
 export type StepOutcome = 'idle' | 'lease-held' | 'waiting' | 'executed' | 'rejected' | 'deliberating' | 'completed' | 'failed' | 'stopped';
-export interface StepResult { readonly run: Run; readonly outcome: StepOutcome }
+export interface StepResult {
+  readonly run: Run;
+  readonly outcome: StepOutcome;
+  /** The decision turn this step ran, if it reached propose(). Look it up in the DecisionStore. */
+  readonly decisionId?: string;
+  /** The journal record this step dispatched, or the one whose recovery blocked it. */
+  readonly recordId?: string;
+  /** Machine-readable reason when the step ended through a failure or rejection path. */
+  readonly code?: string;
+}
 export type RunResult =
   | { readonly kind: 'applied'; readonly run: Run }
   | { readonly kind: 'rejected'; readonly code: string; readonly reason: string };
