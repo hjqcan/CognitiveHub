@@ -21,7 +21,7 @@ for (const id of await runtime.due()) await runtime.step(id);
 
 | 对象 | 内容 |
 | --- | --- |
-| `RunSpec` | `intent`、`budget`、`approval`（必填：`automatic` 或 `each-action`）、可选 `guidance`、`waitMs`、`idle`（空候选时 `deliberate` 请示或 `wait` 等待，默认 `deliberate`） |
+| `RunSpec` | `intent`、`budget`、`approval`（必填：`automatic` 或 `each-action`）、可选 `guidance`、`waitMs`、`idle`（空候选时 `deliberate` 请示或 `wait` 等待，默认 `deliberate`）、`onDecisionError`（决策阶段失败时 `deliberate` 请示或 `wait` 定时重试，默认 `deliberate`） |
 | `Run` | 意图快照、guidance、预算、状态、`operations`（派发过的 journal 记录 id）、`settled`（已确认终态的前缀长度，见 §3）、`wait`、当前 `request`、`approved`、`answers`、`counters`、`progress`、`outcome`、`lease`、CAS 用的 `revision` |
 | `Budget` | `maxDecisions`、`maxActions`、`maxNoProgress`、`deadlineAt` |
 | `Guidance` | 带版本的人类判断标准：`criteria`、`escalate`、`author`。只作为数据进入 `DecisionRequest.guidance`，Jev 适配器放进 `state.guidance`。**它不是 `Policy`**：不能放宽授权，也不能替代它 |
@@ -55,7 +55,7 @@ deliberating ──→ active   有效回应被应用；terminate 回应 → sto
 5. 调用 `GoalEvaluator`。第一步就检查，所以“目标本来就已满足”不会产生任何动作。验收成功后游标才越过已终态的操作，并和 `progress` 一起随本步最后一次写入保存。satisfied / unreachable 但有在途操作 → 继续等待，不带着未知结果进入终态；全部核对后根据当前证据进入 completed / failed。
 6. 有在途操作 → `waiting`。一次只有一个动作。
 7. 预算检查：截止时间、决策次数、动作次数、无进展次数，任一耗尽 → `deliberating`（kind `budget` / `no-progress`）。
-8. `hub.propose()`。wait → 登记 `state` + `time` 条件；deliberation → `deliberating`（kind `decision`）。`idle: 'wait'` 的 Run 在没有任何授权候选时也走 wait 路径，不调用决策器、不产生请示。
+8. `hub.propose()`。wait → 登记 `state` + `time` 条件；deliberation → `deliberating`（kind `decision`）。`idle: 'wait'` 的 Run 在没有任何授权候选时也走 wait 路径，不调用决策器、不产生请示。`onDecisionError: 'wait'` 的 Run 在决策阶段失败时（决策器抛错或超时、返回非法结构、思考期间状态过期）也走 wait 路径，`StepResult.code` 与决策记录带失败码；观测、候选准备、策略阶段的失败仍然请示，因为等待不会修好它们。
 9. `each-action` 模式下核对批准（见 §5）。
 10. 先把 operationId 与 `actions + 1` 写入 Run，再 `hub.execute(..., { live: true })`。派发被拒绝（撤权、状态变化、资源占用）→ 从 `operations` 移除，`noProgress + 1`，返回 `rejected`。记录未终态 → `waiting`；已终态 → `executed`。运行时在 finally 中释放自己创建的提案，包括被拒绝、请求批准和异常路径；执行恢复依靠 journal，不依赖提案继续驻留。所有权租约的释放并入本步最后一次写入；只有“已派发且已终态”的路径保留单独的释放写入，因为 operationId 在派发前写入，提前释放会让别的 worker 把尚未 claim 的 id 当成幽灵删除。
 
@@ -74,6 +74,8 @@ type WaitCondition =
 ```
 
 运行时总会加一个 `time` 上界（`waitMs`），所以没有开放式等待。模型的 `wait` 决定被翻译成 `[state: 当前版本, time: now + waitMs]`；Choice 协议不需要表达结构化条件，等待需求来自模型，唤醒条件由运行时登记。
+
+决策器暂时不可用也不一定需要人。默认下决策器的任何失败都进入 `deliberating`，宿主必须回应才能继续；决策器会因限流、过载、网络抖动短暂失败的宿主（三个游戏都手动解冻过）用 `onDecisionError: 'wait'` 启动，失败被翻译成同样的 `[state, time]` 等待。它按 §6 计入无进展，决策器一直不可用时照样会以 `no-progress` 请求交给宿主。注意决策的实际期限是 `decisionTimeoutMs` 与观测有效期中较短的一个：观测在思考期间过期会以 `stale-state` 失败，所以 `decisionTimeoutMs` 应不大于观测有效期。
 
 没有候选不一定是阻塞。默认下空候选进入 `deliberating`（缺插件、被撤权时宿主应当知道）；长期存在、只在世界出现事情时才行动的 Run（审核队列为空的审核员、开盘前的做市商）用 `idle: 'wait'` 启动，空候选被翻译成同样的 `[state, time]` 等待：不调用决策器，不产生请示，但仍写一条 `outcome: 'wait'`、`decision: null` 的决策记录并计入 `decisions`；状态版本不变的定时唤醒照常累计 `noProgress`。直接使用 Hub 时对应 `propose(intent, { onEmpty: 'wait' })`。
 
@@ -105,7 +107,7 @@ type WaitCondition =
 
 ## 6. 预算与无进展
 
-`counters.signature` 记录上一次“状态版本 + 所选动作”（模型 wait 记为 `wait`）。签名相同 → `noProgress + 1`，不同 → 归零。时间唤醒但版本未变、派发被拒绝也各计一次。任一预算耗尽进入 `deliberating`；提高预算走宿主 `revise(runId, { budget })`，它会自动解除 `budget` 请求，其他请求仍需回应。
+`counters.signature` 记录上一次“状态版本 + 所选动作”（模型 wait 记为 `wait`）。签名相同 → `noProgress + 1`，不同 → 归零。时间唤醒但版本未变、派发被拒绝、决策失败后的等待也各计一次。决策失败不看状态是否变化（实时宿主每帧都变），也不改签名，所以穿插的失败掩盖不了重复同一动作的循环；成功的决策照常按签名归零。宿主取消（`aborted`）不算失败。任一预算耗尽进入 `deliberating`；提高预算走宿主 `revise(runId, { budget })`，它会自动解除 `budget` 请求，其他请求仍需回应。
 
 ## 7. 暂停、停止、修订
 

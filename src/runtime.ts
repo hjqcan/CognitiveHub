@@ -129,9 +129,12 @@ export class IntentRuntime {
     ensure(Number.isInteger(waitMs) && waitMs > 0, 'invalid-run', 'waitMs must be a positive integer');
     const idle = spec.idle ?? 'deliberate';
     ensure(idle === 'deliberate' || idle === 'wait', 'invalid-run', 'idle must be deliberate or wait');
+    const onDecisionError = spec.onDecisionError ?? 'deliberate';
+    ensure(onDecisionError === 'deliberate' || onDecisionError === 'wait', 'invalid-run', 'onDecisionError must be deliberate or wait');
     const now = this.#now();
     const run: Run = immutable({
       id: newId(), revision: 0, intent, guidance: spec.guidance ?? null, budget: this.#budget(spec.budget), approval: spec.approval, waitMs, idle,
+      onDecisionError,
       status: 'active', stopRequested: false, processedEvents: [], outbox: null,
       operations: [], settled: 0, wait: [], request: null, approved: null, answers: [],
       counters: { decisions: 0, actions: 0, noProgress: 0, signature: null }, progress: null, outcome: null, lease: null,
@@ -281,15 +284,20 @@ export class IntentRuntime {
       proposal = await this.hub.propose(draft.run.intent,
         { ...hubSignal, ...(draft.run.guidance ? { guidance: draft.run.guidance } : {}), tags: { runId: draft.run.id }, observation,
           // An idle run treats an empty candidate set as "nothing to do yet" and waits for the state to change.
-          ...(draft.run.idle === 'wait' ? { onEmpty: 'wait' as const } : {}) });
+          ...(draft.run.idle === 'wait' ? { onEmpty: 'wait' as const } : {}),
+          ...(draft.run.onDecisionError === 'wait' ? { onDecisionError: 'wait' as const } : {}) });
     }
     finally { this.#stepping.delete(key); }
     if (proposal.decisionId !== undefined) draft.decisionId = proposal.decisionId;
     if (proposal.kind === 'wait') {
       if (proposal.code !== undefined) draft.code = proposal.code;
+      // A failed decision counts as no progress however the state moves (a real-time host changes it every frame), and
+      // leaves the signature alone so an interleaved failure cannot hide a repeated same-action loop.
+      const failed = proposal.code !== undefined && proposal.code !== 'aborted';
+      const c = draft.run.counters;
       await save({ status: 'waiting', wait: [{ kind: 'state', version: observation.version }, { kind: 'time', at: now + draft.run.waitMs }],
-        counters: this.#count(draft.run.counters, canonical([observation.version, 'wait'])), lease: null });
-      this.#emit('run.waiting', { runId: draft.run.id, reason: proposal.reason });
+        counters: failed ? { ...c, noProgress: c.noProgress + 1 } : this.#count(c, canonical([observation.version, 'wait'])), lease: null });
+      this.#emit('run.waiting', { runId: draft.run.id, reason: proposal.reason, code: proposal.code ?? null });
       return 'waiting';
     }
     if (proposal.kind === 'deliberation') {

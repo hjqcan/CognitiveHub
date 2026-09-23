@@ -112,6 +112,13 @@ export type Decision =
   | { readonly kind: 'action'; readonly candidateId: string; readonly metadata?: Json; readonly provider?: string }
   | { readonly kind: 'wait'; readonly reason: string; readonly metadata?: Json; readonly provider?: string }
   | { readonly kind: 'deliberate'; readonly reason: string; readonly metadata?: Json; readonly provider?: string };
+/**
+ * What a turn does when the decide phase fails (the decider throws or times out, its answer is malformed, or the state
+ * expired while it thought). `deliberate` asks the host; `wait` returns a wait carrying the failure code, for hosts whose
+ * decider fails transiently (rate limits, overload, network) and would otherwise un-park every run by hand.
+ * Failures before the decider is called (observe, prepare, policy) always deliberate: waiting would not fix them.
+ */
+export type DecisionErrorMode = 'deliberate' | 'wait';
 /** Where a propose() turn was when it ended: gathering state, binding candidates, applying policy, deciding, or creating the proposal. */
 export type TurnPhase = 'observe' | 'prepare' | 'policy' | 'decide' | 'commit';
 /**

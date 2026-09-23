@@ -1,4 +1,4 @@
-import type { DeliberationRequest, ExecutionRecord, Guidance, Intent, Json, Observation } from './contracts.js';
+import type { DecisionErrorMode, DeliberationRequest, ExecutionRecord, Guidance, Intent, Json, Observation } from './contracts.js';
 
 /**
  * Persisted run states. Observing, deciding and executing are phases inside one step(), not states:
@@ -35,6 +35,11 @@ export interface RunSpec {
   readonly guidance?: Guidance;
   readonly waitMs?: number;
   readonly idle?: IdleMode;
+  /**
+   * `wait` turns a failed decide phase into a timed wait that counts toward `maxNoProgress`, so a decider that stays down
+   * still reaches the host, as a no-progress request. Default `deliberate`: every decider failure asks the host.
+   */
+  readonly onDecisionError?: DecisionErrorMode;
 }
 export interface Run {
   readonly id: string;
@@ -47,6 +52,8 @@ export interface Run {
   readonly waitMs: number;
   /** Runs persisted before this field existed read as `deliberate`. */
   readonly idle: IdleMode;
+  /** Absent in runs persisted before v0.3, which read as `deliberate`. */
+  readonly onDecisionError?: DecisionErrorMode;
   readonly status: RunStatus;
   /** Sticky host intent, independent of waiting/recovery status. Absent in legacy v0.2 snapshots. */
   readonly stopRequested?: boolean;

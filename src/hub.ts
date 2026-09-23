@@ -1,5 +1,6 @@
 import type {
-  BoundAction, Decision, DecisionProvider, DecisionRecord, DecisionRequest, DecisionStore, DecisionSubject, DeliberationProvider,
+  BoundAction, Decision, DecisionErrorMode, DecisionProvider, DecisionRecord, DecisionRequest, DecisionStore, DecisionSubject,
+  DeliberationProvider,
   EventSink, ExecutionContext, ExecutionJournal, ExecutionRecord, ExecutionResult,
   Guidance, Intent, Json, Observation, Policy, ProposalResult, Receipt, StateProvider, TurnPhase, Verification,
 } from './contracts.js';
@@ -145,6 +146,8 @@ export class CognitiveHub {
   async propose(input: Intent, options: { signal?: AbortSignal; guidance?: Guidance; tags?: Tags;
     /** With no authorized, applicable candidate: ask for deliberation (default) or return a wait without calling the decider. */
     onEmpty?: 'deliberate' | 'wait';
+    /** When the decide phase fails: ask for deliberation (default) or return a wait that carries the failure code. */
+    onDecisionError?: DecisionErrorMode;
     /**
      * A fresh observation of this intent that the caller already took (the managed runtime passes its own). Used while it
      * is still valid, otherwise the hub observes again. execute() always re-observes, so this cannot widen what is dispatched.
@@ -155,6 +158,8 @@ export class CognitiveHub {
     if (guidance !== undefined) assertGuidance(guidance);
     const onEmpty = options.onEmpty ?? 'deliberate';
     ensure(onEmpty === 'deliberate' || onEmpty === 'wait', 'invalid-options', 'onEmpty must be deliberate or wait');
+    const onDecisionError = options.onDecisionError ?? 'deliberate';
+    ensure(onDecisionError === 'deliberate' || onDecisionError === 'wait', 'invalid-options', 'onDecisionError must be deliberate or wait');
     const tags = immutable(options.tags ?? {});
     assertJson(tags as unknown);
     for (const [key, value] of Object.entries(tags)) {
@@ -277,8 +282,11 @@ export class CognitiveHub {
       if (options.signal?.aborted) { code = 'aborted'; result = { kind: 'wait', reason: 'Decision cancelled by host', code }; }
       else {
         code = errorCode(error);
-        this.#emit('decision.rejected', { intentId: intent.id, decisionId, code, phase: ended.phase });
-        result = await this.#ask(intent, code, stateVersion, this.#subject('failed', code, decisionId, ended));
+        // Only a failure of the decide phase can clear up by waiting; earlier ones need a human or a fix.
+        const wait = onDecisionError === 'wait' && ended.phase === 'decide';
+        this.#emit('decision.rejected', { intentId: intent.id, decisionId, code, phase: ended.phase, outcome: wait ? 'wait' : 'deliberation' });
+        result = wait ? { kind: 'wait', reason: `Decision failed: ${code}`, code }
+          : await this.#ask(intent, code, stateVersion, this.#subject('failed', code, decisionId, ended));
       }
     } finally { if (!began) this.#planning.delete(session); }
     await this.#recordDecision(decisionId, intent, tags, guidance, ended ?? trace, result, code);
