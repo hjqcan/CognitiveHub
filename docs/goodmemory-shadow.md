@@ -50,6 +50,71 @@ authorization, and every memory write. There is no instance `baseline` option, n
 label-bearing request, and no `.replays` property. The example module is only a
 re-export of this typed implementation.
 
+## Explicit config-to-Jev opt-in
+
+`createConfiguredGoodMemoryShadowAdvisor` is exported from this same subpath. The
+caller supplies a parsed `memory.shadow` subsection; this package loads no files,
+`.env`, environment variables, or home-directory settings. Omitted configuration,
+an omitted `enabled`, or `enabled: false` returns frozen `{ enabled: false }` before
+reading any other field or dependency. Disabled configuration is intentionally
+ignored, including unknown fields. Skip the evaluator entirely in this branch:
+the host evaluator may inspect a provider name even when its own flag is false.
+
+An enabled subsection can look like this (the environment-variable name is a
+reference, never the key itself):
+
+```json
+{
+  "enabled": true,
+  "apiKeyEnv": "JEV_API_KEY",
+  "model": "<explicit-model-pin>",
+  "timeoutMs": 1000,
+  "maxReplayRecords": 0
+}
+```
+
+```ts
+import { createConfiguredGoodMemoryShadowAdvisor } from '@cognitive-hub/core/goodmemory-shadow';
+
+declare const memoryShadow: unknown; // Selected from the host's explicit config.
+declare const readEnv: (name: string) => unknown; // The host owns credential lookup.
+const configured = createConfiguredGoodMemoryShadowAdvisor(memoryShadow, { readEnv });
+if (configured.enabled) {
+  // Pass configured.provider to the host's strict shadow evaluator only here.
+  // Evaluate only host-approved, source-grounded requests; never apply its advice.
+}
+```
+
+Enabled configuration accepts exactly `enabled`, `apiKeyEnv`, `model`, `endpoint`,
+`timeoutMs`, and `maxReplayRecords`. Raw `apiKey`, unknown/symbol fields, getters,
+and `toJSON` hooks are rejected without invoking them or echoing their values.
+Only plain objects with own data fields are accepted. `apiKeyEnv` must match
+`[A-Za-z_][A-Za-z0-9_]*` and have at most 256 characters. The explicit nonblank model
+is capped at 243 characters so the complete `cognitivehub:` provider name fits
+the host's 256-character bound.
+
+The required `readEnv(name)` callback runs once, after config validation. Its key
+must be a nonblank string of at most 512 characters without control characters.
+Missing/invalid keys or thrown resolver errors fail with fixed messages and codes;
+no input values or error causes are exposed. The returned wrapper and provider
+are frozen and contain no raw config, key, resolver, or credential-bearing public
+state. Jev holds its key privately. JSON serialization does not expose it.
+
+The factory creates a real `JevDecisionProvider` and the existing advisory bridge,
+but construction makes no network call. Calling enabled advice sends the
+host-approved request to `https://api.typesafe.ai/v1/systemone` by default, or to
+the explicit HTTPS `endpoint` (maximum 2048 characters; no URL credentials, query,
+or fragment). Choose an endpoint trusted to receive both the API key and request
+data. The optional injected `fetch` is for a host-controlled transport or an
+offline fake. Tests use only synthetic keys and fake responses.
+
+The configured timeout applies to both Jev and the advisor, with a 1000 ms default
+and the existing 1..2147483647 integer bound. History remains off by default and
+opt-in retention stays bounded at 0..128. HTTP/auth/transport/schema failures flow
+through the existing finite failure categories. Cancellation, abstention,
+concurrency limits, zero dispatch, and host-owned stale-version checks are unchanged.
+There is still no store, writer, automatic evaluation, or automatic application.
+
 ## Privacy and bounded diagnostics
 
 Retention is off by default: `.history` is empty with omitted/zero

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import * as root from '@cognitive-hub/core';
-import { createGoodMemoryShadowAdvisor } from '@cognitive-hub/core/goodmemory-shadow';
+import { createGoodMemoryShadowAdvisor, createConfiguredGoodMemoryShadowAdvisor } from '@cognitive-hub/core/goodmemory-shadow';
 import { JevDecisionProvider } from '@cognitive-hub/core/jev';
 
 const snapshot = { schemaVersion: 1, digest: 'a'.repeat(64), previousVersion: 'b'.repeat(64),
@@ -273,4 +273,153 @@ test('malformed requests cannot inject raw correlation fields into retained hist
     { ...snapshot, scope: { userId: 3 } },
   ]) await assert.rejects(provider.advise(input, signal()), /Invalid GoodMemory shadow/);
   assert.equal(calls, 0); assert.deepEqual(provider.history, []);
+});
+
+
+const configCanary = 'SYNTHETIC_PRIVATE_CONFIG_CANARY';
+const enabledConfig = (extra = {}) => ({ enabled: true, apiKeyEnv: 'JEV_API_KEY', model: 'offline-explicit-pin', ...extra });
+const configDeps = (extra = {}) => ({ readEnv: () => configCanary, fetch: async () => { throw new Error('Unexpected fake request'); }, ...extra });
+const choiceResponse = (choice = 'c1') => Response.json({ model: 'offline-explicit-pin', answers: { next: { type: 'choice', choice,
+  probabilities: { c0: choice === 'c0' ? 1 : 0, c1: choice === 'c1' ? 1 : 0, wait: choice === 'wait' ? 1 : 0, ask: choice === 'ask' ? 1 : 0 }, confidence: 1 } },
+  usage: { input_tokens: 1, output_tokens: 0 } });
+function safeConfigError(callback, code = 'invalid-shadow-config') {
+  assert.throws(callback, error => {
+    assert.equal(error.code, code);
+    assert.equal(error.cause, undefined);
+    assert.doesNotMatch(String(error) + JSON.stringify(error), /SYNTHETIC_PRIVATE_CONFIG_CANARY/);
+    return true;
+  });
+}
+
+test('config factory is subpath-only and disabled before secret, dependency, or serialization hooks', () => {
+  assert.equal(root.createConfiguredGoodMemoryShadowAdvisor, undefined);
+  let touched = 0;
+  const forbidden = () => { touched++; throw new Error(configCanary); };
+  const config = { enabled: false, get apiKeyEnv() { return forbidden(); }, get apiKey() { return forbidden(); },
+    get model() { return forbidden(); }, get endpoint() { return forbidden(); }, toJSON: forbidden };
+  const dependencies = { get readEnv() { return forbidden(); }, get fetch() { return forbidden(); } };
+  for (const value of [undefined, {}, config]) {
+    const result = createConfiguredGoodMemoryShadowAdvisor(value, dependencies);
+    assert.deepEqual(result, { enabled: false });
+    assert.equal(Object.isFrozen(result), true);
+    assert.equal(JSON.stringify(result), '{"enabled":false}');
+    assert.equal('provider' in result, false);
+  }
+  assert.equal(touched, 0);
+});
+
+test('enabled config rejects unknown/raw key, accessor, and toJSON fields without reading their values', () => {
+  let touched = 0;
+  const forbidden = () => { touched++; throw new Error(configCanary); };
+  for (const field of ['apiKey', 'unknown', configCanary, 'toJSON', Symbol(configCanary)]) {
+    const config = enabledConfig();
+    Object.defineProperty(config, field, { enumerable: true, get: forbidden });
+    safeConfigError(() => createConfiguredGoodMemoryShadowAdvisor(config, configDeps({ readEnv: forbidden })));
+  }
+  for (const field of ['enabled', 'apiKeyEnv', 'model', 'endpoint', 'timeoutMs', 'maxReplayRecords']) {
+    const config = enabledConfig();
+    Object.defineProperty(config, field, { enumerable: true, get: forbidden });
+    safeConfigError(() => createConfiguredGoodMemoryShadowAdvisor(config, configDeps({ readEnv: forbidden })));
+  }
+  assert.equal(touched, 0);
+});
+
+test('config errors reject malformed values and model/name limits before resolving any key', () => {
+  let reads = 0;
+  const deps = configDeps({ readEnv: () => { reads++; return configCanary; } });
+  for (const config of [null, [], true, configCanary, 1, { enabled: 1 }, { enabled: null },
+    Object.create(enabledConfig()), enabledConfig({ model: undefined }), enabledConfig({ model: '' }),
+    enabledConfig({ model: ' ' }), enabledConfig({ model: 1 }), enabledConfig({ model: 'a'.repeat(244) }),
+    enabledConfig({ apiKeyEnv: undefined }), enabledConfig({ apiKeyEnv: '' }), enabledConfig({ apiKeyEnv: ' ' }),
+    enabledConfig({ apiKeyEnv: '1BAD' }), enabledConfig({ apiKeyEnv: 'BAD-NAME' }), enabledConfig({ apiKeyEnv: 1 }),
+    enabledConfig({ apiKeyEnv: 'a'.repeat(257) })]) {
+    safeConfigError(() => createConfiguredGoodMemoryShadowAdvisor(config, deps));
+  }
+  for (const endpoint of ['', 1, null, `http://example.invalid/${configCanary}`, `https://${configCanary}@example.invalid`,
+    `https://example.invalid/?key=${configCanary}`, `https://example.invalid/#${configCanary}`, configCanary]) {
+    safeConfigError(() => createConfiguredGoodMemoryShadowAdvisor(enabledConfig({ endpoint }), deps));
+  }
+  for (const timeoutMs of [0, -1, 1.5, 2 ** 31, Infinity, NaN, null, '10']) {
+    safeConfigError(() => createConfiguredGoodMemoryShadowAdvisor(enabledConfig({ timeoutMs }), deps));
+  }
+  for (const maxReplayRecords of [-1, 129, 1.5, Infinity, NaN, null, '1']) {
+    safeConfigError(() => createConfiguredGoodMemoryShadowAdvisor(enabledConfig({ maxReplayRecords }), deps));
+  }
+  assert.equal(reads, 0);
+  assert.equal(createConfiguredGoodMemoryShadowAdvisor(enabledConfig({ model: 'a'.repeat(243) }), deps).provider.name.length, 256);
+});
+
+test('config uses only explicit env resolver and gives finite errors for missing, blank, nonstring, or throwing key resolution', () => {
+  safeConfigError(() => createConfiguredGoodMemoryShadowAdvisor(enabledConfig()), 'invalid-shadow-dependencies');
+  let coercions = 0;
+  const hostileKey = { toString() { coercions++; throw new Error(configCanary); }, toJSON() { coercions++; throw new Error(configCanary); } };
+  for (const key of [undefined, null, '', '   ', 1, hostileKey, 'a'.repeat(513), 'line\nfeed']) {
+    safeConfigError(() => createConfiguredGoodMemoryShadowAdvisor(enabledConfig(), configDeps({ readEnv: () => key })), 'shadow-key-unavailable');
+  }
+  safeConfigError(() => createConfiguredGoodMemoryShadowAdvisor(enabledConfig(), configDeps({ readEnv: () => { throw new Error(configCanary); } })), 'shadow-key-resolver-error');
+  assert.equal(coercions, 0);
+  for (const dependencies of [{}, { readEnv: 1 }, { readEnv: () => configCanary, fetch: 1 },
+    { get readEnv() { throw new Error(configCanary); } }, { readEnv: () => configCanary, get fetch() { throw new Error(configCanary); } }]) {
+    safeConfigError(() => createConfiguredGoodMemoryShadowAdvisor(enabledConfig(), dependencies), 'invalid-shadow-dependencies');
+  }
+});
+
+test('config wires actual Jev authorization and bounded typed choices without retaining config or credentials', async t => {
+  inspectRuntime(t);
+  let reads = 0, calls = 0;
+  const config = enabledConfig({ endpoint: 'https://shadow.example.invalid/v1/choice', timeoutMs: 1000 });
+  const configured = createConfiguredGoodMemoryShadowAdvisor(config, configDeps({
+    readEnv(name) { reads++; assert.equal(name, 'JEV_API_KEY'); return configCanary; },
+    async fetch(url, init) {
+      calls++; assert.equal(url, 'https://shadow.example.invalid/v1/choice');
+      assert.equal(init.headers.Authorization, `Bearer ${configCanary}`);
+      assert.equal(init.method, 'POST'); assert.equal(init.redirect, 'error');
+      assert.ok(init.signal instanceof AbortSignal);
+      const body = JSON.parse(init.body);
+      assert.equal(body.model, 'offline-explicit-pin'); assert.equal(body.questions.next.type, 'choice');
+      assert.deepEqual(Object.keys(body.questions.next.criteria), ['c0', 'c1', 'wait', 'ask']);
+      assert.deepEqual(body.state.candidates.map(candidate => candidate.input.choice), ['keep', 'supersede']);
+      assert.ok(body.state.candidates.every(candidate => candidate.effect === 'read'));
+      assert.doesNotMatch(init.body, /SYNTHETIC_PRIVATE_CONFIG_CANARY|JEV_API_KEY|apiKey/);
+      return choiceResponse();
+    },
+  }));
+  assert.equal(reads, 1); assert.equal(calls, 0, 'construction never makes a request');
+  assert.equal(Object.isFrozen(configured), true); assert.equal(Object.isFrozen(configured.provider), true);
+  assert.deepEqual(Object.keys(configured).sort(), ['enabled', 'provider']);
+  config.model = configCanary; config.toJSON = () => { throw new Error(configCanary); };
+  assert.equal(configured.provider.name, 'cognitivehub:offline-explicit-pin');
+  assert.throws(() => { configured.enabled = false; }, TypeError);
+  assert.throws(() => { configured.provider.name = 'changed'; }, TypeError);
+  const answer = await configured.provider.advise(snapshot, signal());
+  assert.equal(answer.choice, 'supersede'); assert.equal(calls, 1); assert.equal(reads, 1);
+  assert.deepEqual(configured.provider.history, []);
+  assert.doesNotMatch(JSON.stringify(configured), /SYNTHETIC_PRIVATE_CONFIG_CANARY|JEV_API_KEY|apiKey|endpoint|readEnv/);
+});
+
+for (const [name, fetch, category] of [
+  ['401', async () => new Response(configCanary, { status: 401 }), 'provider-error'],
+  ['503', async () => new Response(configCanary, { status: 503 }), 'provider-error'],
+  ['transport', async () => { throw new Error(configCanary); }, 'provider-error'],
+  ['malformed JSON', async () => new Response(configCanary), 'invalid-response'],
+  ['invalid choice', async () => choiceResponse(configCanary), 'invalid-response'],
+]) test(`config ${name} failure stays redacted through advice and bounded history`, async t => {
+  inspectRuntime(t);
+  const { provider } = createConfiguredGoodMemoryShadowAdvisor(enabledConfig({ maxReplayRecords: 1 }), configDeps({ fetch }));
+  const answer = await provider.advise(snapshot, signal());
+  assert.equal(answer.choice, 'invalid_hub_result');
+  assert.equal(provider.history[0].failureCategory, category);
+  assert.doesNotMatch(JSON.stringify({ answer, provider }), /SYNTHETIC_PRIVATE_CONFIG_CANARY/);
+});
+
+test('config retains existing cancellation, allowed-choice, and abstention guards', async t => {
+  inspectRuntime(t); let calls = 0;
+  const { provider } = createConfiguredGoodMemoryShadowAdvisor(enabledConfig({ maxReplayRecords: 3 }), configDeps({ fetch: async () => { calls++; return choiceResponse('wait'); } }));
+  const cancelled = new AbortController(); cancelled.abort();
+  assert.equal((await provider.advise(snapshot, cancelled.signal)).choice, 'invalid_hub_result');
+  assert.equal(provider.history[0].failureCategory, 'cancelled'); assert.equal(calls, 0);
+  assert.equal((await provider.advise({ ...snapshot, allowedChoices: ['abstain'] }, signal())).choice, 'abstain');
+  assert.equal(calls, 0);
+  assert.equal((await provider.advise(snapshot, signal())).choice, 'abstain'); assert.equal(calls, 1);
+  assert.ok(provider.history.every(record => record.dispatched === 0 && record.journalEntries === 0));
 });

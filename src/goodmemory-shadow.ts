@@ -2,6 +2,7 @@
 import type { DecisionProvider, Json } from './contracts.js';
 import type { Run } from './run.js';
 import { limitDecider } from './deciders.js';
+import { JevDecisionProvider } from './jev.js';
 import { HumanInbox, MemoryDecisionStore, MemoryJournal } from './memory.js';
 import { PluginHost } from './plugins.js';
 import { assertJson, ensure, HubError, immutable } from './primitives.js';
@@ -58,6 +59,115 @@ export interface GoodMemoryShadowAdvisor {
   readonly history: readonly GoodMemoryShadowHistoryRecord[];
   /** Unknown on purpose: only the host's strict validator may accept this model advice. */
   advise(request: GoodMemoryShadowRequest, signal: AbortSignal): Promise<unknown>;
+}
+
+/** Host-supplied memory.shadow subsection. Never put a raw API key in this object. */
+export type GoodMemoryShadowConfig =
+  | { readonly enabled?: false }
+  | {
+    readonly enabled: true;
+    /** Name only, resolved once by the explicitly supplied host callback. */
+    readonly apiKeyEnv: string;
+    /** Explicit model pin; at most 243 characters including any alias/version. */
+    readonly model: string;
+    readonly endpoint?: string;
+    readonly timeoutMs?: number;
+    readonly maxReplayRecords?: number;
+  };
+export interface GoodMemoryShadowConfigDependencies {
+  /** No default resolver: the package never reads process.env, a file, or a home directory. */
+  readonly readEnv: (name: string) => unknown;
+  /** Optional transport injection; tests must supply an offline fake. */
+  readonly fetch?: typeof globalThis.fetch;
+}
+/** Disabled has no provider: hosts must branch before constructing/evaluating a shadow request. */
+export type ConfiguredGoodMemoryShadowAdvisor =
+  | { readonly enabled: false }
+  | { readonly enabled: true; readonly provider: GoodMemoryShadowAdvisor };
+
+// Descriptor inspection prevents executing config getters or toJSON while validating untrusted
+// configuration. Proxy traps can still execute; normalize their exceptions without retaining causes.
+function configDescriptor(value: object, key: string, code: string): PropertyDescriptor | undefined {
+  try { return Object.getOwnPropertyDescriptor(value, key); }
+  catch { throw new HubError(code, 'Unable to inspect shadow configuration'); }
+}
+function plainConfig(value: unknown, code: string): asserts value is Record<string, unknown> {
+  let valid = false;
+  try {
+    valid = value !== null && typeof value === 'object' && !Array.isArray(value) &&
+      (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+  } catch { /* Only a static error is exposed, never a proxy's message or cause. */ }
+  ensure(valid, code, 'Shadow configuration must be a plain object');
+}
+function configData(value: object, key: string, code: string): unknown {
+  const descriptor = configDescriptor(value, key, code);
+  ensure(!descriptor || 'value' in descriptor, code, 'Shadow configuration must use data fields, not accessors');
+  return descriptor?.value;
+}
+
+/**
+ * Opt-in config-to-Jev factory. Disabled returns before other fields or dependencies are inspected.
+ * It retains only the advisor, never the raw config or resolver. Creation makes no network request;
+ * enabled advice sends host-approved request data to the selected endpoint. No store/write access.
+ */
+export function createConfiguredGoodMemoryShadowAdvisor(
+  config: unknown = undefined,
+  dependencies?: GoodMemoryShadowConfigDependencies,
+): ConfiguredGoodMemoryShadowAdvisor {
+  const invalid = 'invalid-shadow-config';
+  if (config === undefined) return Object.freeze({ enabled: false });
+  plainConfig(config, invalid);
+  const enabled = configData(config, 'enabled', invalid);
+  if (enabled === undefined || enabled === false) return Object.freeze({ enabled: false });
+  ensure(enabled === true, invalid, 'Shadow enabled must be a boolean');
+  let keys: readonly PropertyKey[];
+  try { keys = Reflect.ownKeys(config); }
+  catch { throw new HubError(invalid, 'Unable to inspect shadow configuration'); }
+  const allowed = ['enabled', 'apiKeyEnv', 'model', 'endpoint', 'timeoutMs', 'maxReplayRecords'];
+  ensure(keys.every(key => typeof key === 'string' && allowed.includes(key)), invalid, 'Unsupported shadow configuration field');
+  const apiKeyEnv = configData(config, 'apiKeyEnv', invalid);
+  const model = configData(config, 'model', invalid);
+  const endpoint = configData(config, 'endpoint', invalid);
+  const configuredTimeout = configData(config, 'timeoutMs', invalid);
+  const configuredRetention = configData(config, 'maxReplayRecords', invalid);
+  const timeoutMs = configuredTimeout === undefined ? 1000 : configuredTimeout;
+  const maxReplayRecords = configuredRetention === undefined ? 0 : configuredRetention;
+  ensure(typeof apiKeyEnv === 'string' && apiKeyEnv.length <= 256 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv),
+    invalid, 'apiKeyEnv must name an environment variable (max 256 characters)');
+  // GoodMemory caps the complete provider name at 256; the bridge adds "cognitivehub:".
+  ensure(typeof model === 'string' && model.trim().length > 0 && model.length <= 243,
+    invalid, 'model must be explicit nonblank text (max 243 characters)');
+  let normalizedEndpoint: string | undefined;
+  if (endpoint !== undefined) {
+    ensure(typeof endpoint === 'string' && endpoint.length > 0 && endpoint.length <= 2048,
+      invalid, 'endpoint must be an HTTPS URL (max 2048 characters)');
+    let url: URL;
+    try { url = new URL(endpoint); }
+    catch { throw new HubError(invalid, 'endpoint must be a valid HTTPS URL'); }
+    ensure(url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash,
+      invalid, 'endpoint must use HTTPS without credentials, query, or fragment');
+    normalizedEndpoint = url.href;
+  }
+  ensure(Number.isInteger(timeoutMs) && typeof timeoutMs === 'number' && timeoutMs > 0 && timeoutMs <= 2_147_483_647,
+    invalid, 'timeoutMs must be a positive integer no greater than 2147483647');
+  ensure(Number.isInteger(maxReplayRecords) && typeof maxReplayRecords === 'number' && maxReplayRecords >= 0 && maxReplayRecords <= 128,
+    invalid, 'maxReplayRecords must be an integer from 0 to 128');
+  const invalidDependencies = 'invalid-shadow-dependencies';
+  plainConfig(dependencies, invalidDependencies);
+  const readEnv = configData(dependencies, 'readEnv', invalidDependencies);
+  const transport = configData(dependencies, 'fetch', invalidDependencies);
+  ensure(typeof readEnv === 'function', invalidDependencies, 'An explicit readEnv callback is required');
+  ensure(transport === undefined || typeof transport === 'function', invalidDependencies, 'fetch must be a function');
+  let apiKey: unknown;
+  try { apiKey = readEnv(apiKeyEnv); }
+  catch { throw new HubError('shadow-key-resolver-error', 'Unable to resolve the shadow API key'); }
+  ensure(typeof apiKey === 'string' && apiKey.trim().length > 0 && apiKey.length <= 512 && !/[\x00-\x1f\x7f]/.test(apiKey),
+    'shadow-key-unavailable', 'The referenced shadow API key must be nonblank text (max 512 characters, no control characters)');
+  const decision = new JevDecisionProvider({ apiKey, model, timeoutMs,
+    ...(normalizedEndpoint === undefined ? {} : { endpoint: normalizedEndpoint }),
+    ...(transport === undefined ? {} : { fetch: transport as typeof globalThis.fetch }),
+  });
+  return Object.freeze({ enabled: true, provider: createGoodMemoryShadowAdvisor({ decision, timeoutMs, maxReplayRecords }) });
 }
 
 const capability = 'goodmemory.shadow-choice@1';

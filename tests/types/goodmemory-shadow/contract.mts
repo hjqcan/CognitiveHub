@@ -1,5 +1,5 @@
-import { createGoodMemoryShadowAdvisor } from '@cognitive-hub/core/goodmemory-shadow';
-import type { GoodMemoryShadowAdvisor, GoodMemoryShadowRequest, GoodMemoryShadowHistoryRecord } from '@cognitive-hub/core/goodmemory-shadow';
+import { createGoodMemoryShadowAdvisor, createConfiguredGoodMemoryShadowAdvisor } from '@cognitive-hub/core/goodmemory-shadow';
+import type { GoodMemoryShadowAdvisor, GoodMemoryShadowRequest, GoodMemoryShadowHistoryRecord, GoodMemoryShadowConfig, ConfiguredGoodMemoryShadowAdvisor, GoodMemoryShadowConfigDependencies } from '@cognitive-hub/core/goodmemory-shadow';
 import type { DecisionProvider } from '@cognitive-hub/core';
 
 // Intentionally independent structural consumer: no GoodMemory runtime dependency.
@@ -38,3 +38,26 @@ if (record) {
   // @ts-expect-error Scalar diagnostics are immutable too.
   record.cleanup = 'stopped';
 }
+
+const config: GoodMemoryShadowConfig = { enabled: true, apiKeyEnv: 'JEV_API_KEY', model: 'offline-explicit-pin' };
+const deps: GoodMemoryShadowConfigDependencies = { readEnv: _name => 'synthetic-fixture-key' };
+const configured: ConfiguredGoodMemoryShadowAdvisor = createConfiguredGoodMemoryShadowAdvisor(config, deps);
+if (configured.enabled) {
+  const configuredHost: HostProvider = configured.provider;
+  const configuredAnswer: Promise<unknown> = configuredHost.advise(request, signal);
+  void configuredAnswer;
+  // @ts-expect-error Config state is immutable.
+  configured.provider = provider;
+} else {
+  // @ts-expect-error Disabled state has no provider to accidentally evaluate.
+  configured.provider;
+}
+// @ts-expect-error Credentials are never exposed on config state.
+configured.apiKey;
+// @ts-expect-error Raw keys are not part of the accepted configuration schema.
+const rawConfig: GoodMemoryShadowConfig = { enabled: true, apiKey: 'placeholder', model: 'pin' };
+// @ts-expect-error Enabled config requires an explicit model.
+const missingModel: GoodMemoryShadowConfig = { enabled: true, apiKeyEnv: 'JEV_API_KEY' };
+// @ts-expect-error Config state is immutable.
+configured.enabled = false;
+void [rawConfig, missingModel, createConfiguredGoodMemoryShadowAdvisor()];
