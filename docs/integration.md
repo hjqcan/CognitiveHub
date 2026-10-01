@@ -1,5 +1,8 @@
 # 接入已有宿主，而不是再造一个控制中心
 
+GoodMemory 的四链路隔离探索（准入、更新、删除提案、召回重排）见
+[`goodmemory-four-lane-exploration.md`](./goodmemory-four-lane-exploration.md)；它没有安装生产自动写入或删除钩子。
+
 ## 机器人管理平台
 
 建议先接入现有流程的“需要情境判断”节点。RMS/RBS 继续拥有正式任务、派发、状态、资源与执行生命周期；能力插件只通过这些既有接口请求操作。
