@@ -69,3 +69,11 @@ TypeScript 配置开启 strict、exactOptionalPropertyTypes、noUncheckedIndexed
 内核改动的升级门槛还包括真实消费者：三个游戏通过 `file:` 链接使用内核，每次改动后在各自仓库运行 `npm run check` 并与改动前的基线对比（v0.3 的记录见 `docs/game-integration-v0.3.md`）。重启恢复只在“单进程、一份 journal 由一个 Hub 驱动、插件精确同版本”的前提下验证。
 
 自动化工作流运行类型检查、离线单元测试（含对 PostgreSQL 17 服务容器的一致性测试）和模拟示例，不接触 API 密钥或实际设备。
+
+## Optional GoodMemory shadow boundary
+
+`npm run test:goodmemory-shadow` builds the typed opt-in subpath, compiles a strict
+structural consumer, and runs only its small offline contract suite. It needs no
+PGlite, database, model credentials, or network endpoint. See
+[`goodmemory-shadow.md`](goodmemory-shadow.md) for the local package workflow,
+privacy defaults, retained-field rationale, and host-owned validation boundary.

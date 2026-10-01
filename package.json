@@ -19,21 +19,35 @@
     "./pg": {
       "types": "./dist/pg.d.ts",
       "import": "./dist/pg.js"
+    },
+    "./goodmemory-shadow": {
+      "types": "./dist/goodmemory-shadow.d.ts",
+      "import": "./dist/goodmemory-shadow.js"
     }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test tests/*.test.mjs",
+    "test": "npm run build && tsc -p tests/types/goodmemory-shadow/tsconfig.json && node --test tests/*.test.mjs",
     "test:pg": "npm run build && node --env-file=.env --test tests/*.test.mjs",
     "demo": "npm run build && node examples/robot-platform.mjs",
     "replay": "node scripts/replay.mjs",
     "bench": "npm run build && node scripts/bench-step.mjs 2000 && node scripts/bench-step.mjs 1000 --pg",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "prepack": "npm run build",
+    "test:goodmemory-shadow": "npm run build && tsc -p tests/types/goodmemory-shadow/tsconfig.json && node --test tests/goodmemory-shadow.test.mjs"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",
     "pg": "8.23.0",
     "typescript": "5.8.3"
-  }
+  },
+  "files": [
+    "dist",
+    "examples",
+    "scripts",
+    "docs",
+    "README.md",
+    "SECURITY.md"
+  ]
 }

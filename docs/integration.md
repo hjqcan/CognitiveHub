@@ -77,3 +77,11 @@ new JevDecisionProvider({ apiKey, model: 'jev-1.13.0',
 收到 deliberation 后展示：目标、stateVersion、缺少判断的原因。用户回应由你的 HMI/业务服务认证、保存并修订意图；之后重新观察和 propose。
 
 普通文本回答不能提升权限。批准动作、提供事实和修改策略在宿主中应是不同事件。旧提案的有效期不因人工回应自动延长。
+
+## GoodMemory experimental shadow adapter
+
+The opt-in `@cognitive-hub/core/goodmemory-shadow` subpath returns unknown model
+advice to GoodMemory's strict validator. It uses advisory runtime only, accepts no
+store handle or evaluator baseline, retains no history by default, and never
+applies a memory change. The structural contract and explicit bounded diagnostic
+retention are documented in [`goodmemory-shadow.md`](goodmemory-shadow.md).
