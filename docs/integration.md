@@ -88,3 +88,6 @@ advice to GoodMemory's strict validator. It uses advisory runtime only, accepts 
 store handle or evaluator baseline, retains no history by default, and never
 applies a memory change. The structural contract and explicit bounded diagnostic
 retention are documented in [`goodmemory-shadow.md`](goodmemory-shadow.md).
+## Current-source support experiment
+
+See [the current-support gate](./goodmemory-current-support-exploration.md) for an opt-in four-lane research wrapper that separates host-observed source support from a stable version hash. It remains default-off and read-only, with explicit unavailable-capability fallback; it does not add automatic production write/delete hooks.
