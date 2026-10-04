@@ -172,6 +172,7 @@ const check = await reevaluate(await decisions.list({ tag: { key: 'runId', value
 | [宿主接入](docs/integration.md) | RMS/RBS、人形机器人、C# 接入方向 |
 | [测试与开发](docs/development.md) | 验证命令、测试覆盖、贡献约束 |
 | [GoodMemory 配置研究示例](docs/goodmemory-configured-source-research.md) | 文件路径入口、显式来源检查与四链路 shadow/提案边界，默认关闭 |
+| [GoodMemory 当前状态召回研究](docs/goodmemory-current-state-recall-research.md) | 可选读取入口、并发回退与上下文测试，以及宿主状态协议和未接入路径 |
 | [参考实现分析](docs/references.md) | 从 jev-trader / dsh 借鉴什么、明确不照搬什么 |
 | [架构决策 0001](docs/adr/0001-foundation.md) | 技术栈与首版取舍 |
 | [架构决策 0002](docs/adr/0002-durable-recovery.md) | 动作身份、跨进程恢复只查询不重发、单实例驱动约定 |
